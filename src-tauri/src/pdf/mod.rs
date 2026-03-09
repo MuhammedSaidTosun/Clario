@@ -1,8 +1,10 @@
 use pdfium_render::prelude::*;
 use png::{BitDepth, ColorType};
 use serde::Serialize;
+use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
@@ -59,6 +61,23 @@ pub fn render_pdf_page(
         ));
     }
 
+    let output_path = output_path_for_render(
+        cache_root,
+        &input_path,
+        page,
+        normalized_zoom,
+        normalized_device_pixel_ratio,
+    )?;
+
+    if is_valid_cached_render(&output_path) {
+        return Ok(PdfPageRenderResponse {
+            image_path: output_path.to_string_lossy().into_owned(),
+            page,
+            page_count,
+            zoom: normalized_zoom,
+        });
+    }
+
     // Backend command uses 1-based indexing externally; PDFium page APIs are 0-based.
     let page_index = page - 1;
     let pdf_page = document
@@ -70,14 +89,6 @@ pub fn render_pdf_page(
     let bitmap = pdf_page
         .render_with_config(&render_config)
         .map_err(|error| format!("Failed to render page {page}: {error}"))?;
-
-    let output_path = output_path_for_render(
-        cache_root,
-        &input_path,
-        page,
-        normalized_zoom,
-        normalized_device_pixel_ratio,
-    )?;
 
     write_bitmap_as_png(&bitmap, &output_path)?;
 
@@ -138,9 +149,10 @@ fn output_path_for_render(
     zoom: f32,
     device_pixel_ratio: f32,
 ) -> Result<PathBuf, String> {
+    let file_identity = file_identity_tag(input_path);
     let render_dir = cache_root
         .join("pdf-renders")
-        .join(file_stem_safe(input_path));
+        .join(format!("{}-{}", file_stem_safe(input_path), file_identity));
 
     fs::create_dir_all(&render_dir).map_err(|error| {
         format!(
@@ -154,6 +166,15 @@ fn output_path_for_render(
     let output_name = format!("page-{page}-z{zoom_tag}-dpr{dpr_tag}.png");
 
     Ok(render_dir.join(output_name))
+}
+
+fn is_valid_cached_render(output_path: &Path) -> bool {
+    let metadata = match fs::metadata(output_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+
+    metadata.is_file() && metadata.len() > 0
 }
 
 fn write_bitmap_as_png(bitmap: &PdfBitmap<'_>, output_path: &Path) -> Result<(), String> {
@@ -203,6 +224,18 @@ fn file_stem_safe(path: &Path) -> String {
     } else {
         output
     }
+}
+
+fn file_identity_tag(path: &Path) -> String {
+    let canonical_path = match path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => path.to_path_buf(),
+    };
+    let identity_source = canonical_path.to_string_lossy();
+    let mut hasher = DefaultHasher::new();
+    identity_source.hash(&mut hasher);
+
+    format!("{:016x}", hasher.finish())
 }
 
 fn is_pdf_path(path: &Path) -> bool {

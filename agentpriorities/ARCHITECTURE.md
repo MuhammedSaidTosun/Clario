@@ -1,3 +1,9 @@
+
+---
+
+# `ARCHITECTURE.md`
+
+```md
 # ARCHITECTURE.md
 
 This document describes the architecture of the application.
@@ -6,97 +12,154 @@ This document describes the architecture of the application.
 
 # Overview
 
-The application consists of three main layers:
+The application consists of five main layers:
 
 1. UI Layer
-2. Engine Layer
-3. Conversion Layer
+2. Reader Engine Layer
+3. Editor Layer
+4. Conversion Layer
+5. Persistence / Save Layer
+
+Each layer must evolve incrementally and remain compatible with the roadmap order.
 
 ---
 
 # UI Layer
 
 Technology:
-
-Svelte
+- Svelte
 
 Responsibilities:
-
-* rendering the interface
-* user interaction
-* displaying PDF pages
-* editor overlays
+- rendering the interface
+- user interaction
+- displaying PDF pages
+- viewer controls
+- editor overlays
+- reader layout modes
+- status and debug feedback
 
 Important components:
+- `Toolbar`
+- `Sidebar`
+- `PdfViewer`
 
-Toolbar
-Sidebar
-PdfViewer
+The UI layer must not own heavy rendering, parsing, or conversion logic.
 
 ---
 
-# Engine Layer
+# Reader Engine Layer
 
 Technology:
-
-Rust
+- Rust
 
 Responsibilities:
-
-* PDF rendering
-* file management
-* command handling
-* document state management
+- PDF rendering
+- page image generation
+- cache-aware page rendering
+- file management
+- command handling
+- page navigation support
+- reader performance primitives
 
 Important modules:
+- `commands/`
+- `pdf/`
 
-commands/
-pdf/
+This layer is responsible for opening PDFs and rendering pages for the viewer.
+
+---
+
+# Editor Layer
+
+Technology:
+- Rust + Svelte
+
+Responsibilities:
+- DocumentIR-based editing state
+- overlay system
+- object selection
+- annotations
+- editing tools
+- undo / redo
+
+Editing must follow a layered model:
+
+1. PDF render layer
+2. interaction / overlay layer
+3. UI control layer
+
+User changes update the shared document model.
 
 ---
 
 # Conversion Layer
 
 Technology:
-
-Rust
+- Rust
 
 Responsibilities:
-
-* importing formats
-* exporting formats
-* layout engine
+- importing formats
+- exporting formats
+- layout engine
+- document transformation
+- format-specific adapters
 
 Converters:
+- TXT converter
+- MD converter
+- EPUB converter
+- DOCX converter
+- PPTX converter
 
-TXT converter
-MD converter
-EPUB converter
-DOCX converter
-PPTX converter
+This layer is the long-term core of the converter engine.
+
+---
+
+# Persistence / Save Layer
+
+Technology:
+- Rust
+
+Responsibilities:
+- overlay save
+- flatten save
+- export file generation
+- cache file persistence
+- output file consistency
+
+Two save modes exist:
+
+## Overlay Save
+Keeps the original PDF and writes edits/annotations on top.
+
+## Flatten Save
+Renders pages to images and rebuilds the PDF for compatibility.
 
 ---
 
 # Document Model
 
-All document data must be stored in:
+All editable document data must be stored in:
 
-DocumentIR
+`DocumentIR`
 
-DocumentIR is the single source of truth between:
+`DocumentIR` is the single source of truth between:
 
 UI ↔ Rust
+
+It will be introduced in the editor phase and used for later editing and conversion workflows.
 
 ---
 
 # Data Flow
 
-Import:
+## Reader flow
+PDF → Rust PDF engine → rendered page image → Svelte viewer
 
-File → Parser → DocumentIR → Layout Engine → PDF
+## Import flow
+File → Parser → DocumentIR / layout model → PDF
 
-Export:
-
+## Export flow
 PDF → Extraction → Converter → Target Format
 
 ---
@@ -107,27 +170,33 @@ PDF pages are rendered using a Rust PDF engine.
 
 Rendered pages are displayed in the Svelte viewer.
 
----
-
-# Editing
-
-Editing uses a layered approach:
-
-1. PDF render layer
-2. interaction layer
-3. UI layer
-
-User changes update the DocumentIR model.
+Current rendering principles:
+- backend-controlled rendering
+- cache-backed page output
+- high-DPI-aware rendering
+- lossless page output where required for quality
 
 ---
 
-# Saving
+# Continuous Reading Model
 
-Two save modes exist:
+The reader will evolve from:
+- single-page navigation
 
-Overlay Save
-Flatten Save
+toward:
+- continuous scroll viewer
+- visible page tracking
+- lazy page rendering
+- prefetch and render queue support
 
-Overlay Save keeps original PDF.
+These are reader-layer concerns, not editor concerns.
 
-Flatten Save renders pages to images and rebuilds the PDF.
+---
+
+# Architecture Rules
+
+1. Rust owns rendering, parsing, conversion, and save logic.
+2. Svelte owns layout, controls, and presentation.
+3. Tauri commands are the backend boundary.
+4. The reader and converter systems must remain separable.
+5. The editor system must build on top of the reader, not replace it.

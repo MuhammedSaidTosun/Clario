@@ -2,14 +2,13 @@
 
 This file defines the rules for AI coding agents working on this repository.
 
-Project: Cross-platform PDF Reader + Editor + Converter
+Project: Cross-platform PDF Reader + Editor + Converter  
 Stack: Tauri + Rust + Svelte
 
 Target platforms:
-
-* macOS
-* Windows
-* Linux
+- macOS
+- Windows
+- Linux
 
 The application must run fully offline.
 
@@ -22,6 +21,8 @@ The application must run fully offline.
 3. Communication between UI and backend must use Tauri commands.
 4. The system must be modular.
 5. Every feature must be implemented incrementally.
+6. The roadmap must be followed strictly in order.
+7. Completed steps must not be broken by later work.
 
 ---
 
@@ -29,114 +30,54 @@ The application must run fully offline.
 
 Build a professional desktop application capable of:
 
-* Viewing PDFs
-* Editing PDFs
-* Converting multiple formats to PDF
-* Exporting PDFs to other formats
+- Viewing PDFs
+- Editing PDFs
+- Converting multiple formats to PDF
+- Exporting PDFs to other formats
 
 Supported formats:
 
 Import → PDF
-
-* TXT
-* MD
-* EPUB
-* DOCX
-* PPTX
+- TXT
+- MD
+- EPUB
+- DOCX
+- PPTX
 
 Export from PDF
-
-* TXT
-* DOCX
-* PPTX
-* MD
-* EPUB
+- TXT
+- DOCX
+- PPTX
+- MD
+- EPUB
 
 ---
 
 # Project Structure
 
 Frontend:
-
-src/
-components/
-Toolbar.svelte
-Sidebar.svelte
-PdfViewer.svelte
+- `src/`
+- `src/components/`
+- `Toolbar.svelte`
+- `Sidebar.svelte`
+- `PdfViewer.svelte`
 
 Backend:
+- `src-tauri/`
+- `src-tauri/src/`
+- `src-tauri/src/main.rs`
+- `src-tauri/src/commands/`
+- `src-tauri/src/pdf/`
+- `src-tauri/src/converters/`
 
-src-tauri/
-src/
-main.rs
-commands/
-pdf/
-converters/
+This structure may grow, but agents must keep it modular and avoid unnecessary restructuring.
 
 ---
 
 # Communication Model
 
-Frontend must communicate with Rust using:
-
-invoke()
+Frontend must communicate with Rust using Tauri commands via `invoke()`.
 
 Example:
-
-invoke("render_page")
-
----
-
-# Code Style Rules
-
-Rust:
-
-* Use Result instead of panic
-* Avoid unwrap()
-* Prefer small modules
-* Keep files under ~300 lines if possible
-
-Svelte:
-
-* Components must be small
-* UI must not contain business logic
-* State must be centralized
-
----
-
-# Dependency Rules
-
-AI agents must NOT:
-
-* add new dependencies without explaining why
-* replace existing frameworks
-* introduce heavy frameworks
-
----
-
-# Logging
-
-Application logs must be written to:
-
-app_data/logs/app.log
-
----
-
-# Development Workflow
-
-When implementing a feature:
-
-1. read the project structure
-2. propose a short plan
-3. implement minimal working code
-4. explain changed files
-
----
-
-# Safety
-
-AI agents must NOT:
-
-* delete project structure
-* rewrite large parts of the system
-* change architecture decisions
+```ts
+invoke("render_pdf_page")
