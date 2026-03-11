@@ -31,7 +31,7 @@
     onNext: () => void;
     onZoomIn: () => void;
     onZoomOut: () => void;
-    onLoadMore: () => void;
+    onLazyLoadNext: () => void;
     onActivePageChange: (page: number) => void;
   };
 
@@ -51,11 +51,12 @@
     onNext,
     onZoomIn,
     onZoomOut,
-    onLoadMore,
+    onLazyLoadNext,
     onActivePageChange
   }: Props = $props();
 
   const VIEWPORT_PADDING = 24;
+  const NEAR_END_SCROLL_THRESHOLD_PX = 480;
 
   let fitMode = $state<FitMode>("manual");
   let logicalPageSizeByNumber = $state<Record<number, { width: number; height: number }>>({});
@@ -194,6 +195,21 @@
       reportActivePage(visiblePage);
     }
     scheduleVisiblePageScan();
+    maybeRequestLazyLoad();
+  }
+
+  function maybeRequestLazyLoad(): void {
+    const viewport = viewportElement;
+
+    if (!viewport || !hasMorePages || isBusy) {
+      return;
+    }
+
+    const remainingScrollPx = viewport.scrollHeight - (viewport.scrollTop + viewport.clientHeight);
+
+    if (remainingScrollPx <= NEAR_END_SCROLL_THRESHOLD_PX) {
+      onLazyLoadNext();
+    }
   }
 
   function computeDisplayWidthForPage(
@@ -359,6 +375,9 @@
   $effect(() => {
     renderedPages;
     scheduleVisiblePageScan();
+    requestAnimationFrame(() => {
+      maybeRequestLazyLoad();
+    });
   });
 
   $effect(() => {
@@ -391,8 +410,8 @@
       );
 
       if (scrolled && handledScrollTargetToken < target.token) {
-        reportActivePage(target.page);
         handledScrollTargetToken = target.token;
+        scheduleVisiblePageScan();
       }
     });
   });
@@ -436,7 +455,7 @@
 
   <p><strong>Page:</strong> {currentPage} / {pageCount}</p>
   <p><strong>Zoom:</strong> {zoom.toFixed(2)}x</p>
-  <p><strong>Loaded pages:</strong> 1 - {loadedThroughPage}</p>
+  <p><strong>Loaded pages:</strong> {loadedThroughPage > 0 ? `1 - ${loadedThroughPage}` : "0"}</p>
 
   {#if renderedPages.length > 0}
     <div class="viewport" bind:this={viewportElement} onscroll={handleViewportScroll}>
@@ -457,9 +476,7 @@
     </div>
 
     {#if hasMorePages}
-      <div class="load-more-row">
-        <button type="button" onclick={onLoadMore} disabled={isBusy}>Load more pages</button>
-      </div>
+      <p class="lazy-load-hint">More pages load automatically while you scroll.</p>
     {/if}
   {:else}
     <p>No PDF page rendered yet.</p>
@@ -536,9 +553,9 @@
     height: auto;
   }
 
-  .load-more-row {
+  .lazy-load-hint {
     margin-top: 0.75rem;
-    display: flex;
-    justify-content: center;
+    font-size: 0.88rem;
+    color: #435468;
   }
 </style>

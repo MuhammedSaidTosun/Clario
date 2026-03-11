@@ -26,6 +26,20 @@
     token: number;
   };
 
+  type NavigationTransition = {
+    targetPage: number;
+    token: number;
+    startedAtMs: number;
+  };
+
+  type RenderRequestKeyParts = {
+    filePath: string;
+    page: number;
+    zoom: number;
+    devicePixelRatio: number;
+    generation: number;
+  };
+
   const MIN_ZOOM = 0.5;
   const MAX_ZOOM = 3.0;
   const ZOOM_STEP = 0.25;
@@ -33,6 +47,9 @@
   const MAX_DEVICE_PIXEL_RATIO = 4;
   const INITIAL_RENDER_WINDOW_SIZE = 24;
   const LOAD_MORE_WINDOW_SIZE = 8;
+  const PREFETCH_TRIGGER_PAGES = 6;
+  const PREFETCH_COOLDOWN_MS = 250;
+  const NAVIGATION_TRANSITION_TIMEOUT_MS = 1500;
 
   let selectedFilePath = $state("No file selected.");
   let debugDirs = $state<AppDirs | null>(null);
@@ -49,6 +66,11 @@
   let scrollTargetToken = 0;
   let renderError = $state<string | null>(null);
   let isRendering = $state(false);
+  let lastPrefetchAt = 0;
+  let navigationTransition = $state<NavigationTransition | null>(null);
+  let renderRequestGeneration = 0;
+  let pendingRenderRequests = new Map<string, Promise<PdfPageRenderResponse>>();
+  let completedRenderRequests = new Map<string, PdfPageRenderResponse>();
 
   function formatError(error: unknown): string {
     if (error instanceof Error) {
@@ -91,15 +113,75 @@
     renderedPages = [];
     loadedThroughPage = 0;
     scrollTarget = null;
+    navigationTransition = null;
     renderError = null;
+    lastPrefetchAt = 0;
+    pendingRenderRequests.clear();
+    completedRenderRequests.clear();
+  }
+
+  function normalizeForKey(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 1;
+    }
+
+    return Math.round(value * 100) / 100;
+  }
+
+  function renderRequestKey(parts: RenderRequestKeyParts): string {
+    return [
+      parts.generation,
+      parts.filePath,
+      parts.page,
+      normalizeForKey(parts.zoom),
+      normalizeForKey(parts.devicePixelRatio)
+    ].join("|");
+  }
+
+  function beginRenderGeneration(): void {
+    renderRequestGeneration += 1;
+    pendingRenderRequests.clear();
+    completedRenderRequests.clear();
   }
 
   function requestViewerScrollToPage(page: number): void {
     scrollTargetToken += 1;
+
+    navigationTransition = {
+      targetPage: page,
+      token: scrollTargetToken,
+      startedAtMs: Date.now()
+    };
+
     scrollTarget = {
       page,
       token: scrollTargetToken
     };
+  }
+
+  function maybePrefetchAhead(focusPage: number): void {
+    if (!currentPdfPath || isRendering || pageCount < 1) {
+      return;
+    }
+
+    if (loadedThroughPage >= pageCount) {
+      return;
+    }
+
+    const remainingLoadedAhead = loadedThroughPage - focusPage;
+
+    if (remainingLoadedAhead > PREFETCH_TRIGGER_PAGES) {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (now - lastPrefetchAt < PREFETCH_COOLDOWN_MS) {
+      return;
+    }
+
+    lastPrefetchAt = now;
+    void loadNextPageWindow();
   }
 
   function handleActivePageChange(page: number): void {
@@ -111,9 +193,27 @@
       return;
     }
 
+    const transition = navigationTransition;
+
+    if (transition !== null) {
+      if (page === transition.targetPage) {
+        navigationTransition = null;
+      } else {
+        const isTransitionExpired = Date.now() - transition.startedAtMs >= NAVIGATION_TRANSITION_TIMEOUT_MS;
+
+        if (!isTransitionExpired) {
+          return;
+        }
+
+        navigationTransition = null;
+      }
+    }
+
     if (currentPage !== page) {
       currentPage = page;
     }
+
+    maybePrefetchAhead(page);
   }
 
   async function renderSinglePdfPage(
@@ -122,12 +222,91 @@
     zoomToRender: number,
     devicePixelRatio: number
   ): Promise<PdfPageRenderResponse> {
-    return invoke<PdfPageRenderResponse>("render_pdf_page", {
+    const generation = renderRequestGeneration;
+    const key = renderRequestKey({
+      filePath,
+      page: pageToRender,
+      zoom: zoomToRender,
+      devicePixelRatio,
+      generation
+    });
+
+    const completed = completedRenderRequests.get(key);
+
+    if (completed) {
+      return completed;
+    }
+
+    const pending = pendingRenderRequests.get(key);
+
+    if (pending) {
+      return pending;
+    }
+
+    const request = invoke<PdfPageRenderResponse>("render_pdf_page", {
       filePath,
       page: pageToRender,
       zoom: zoomToRender,
       devicePixelRatio
-    });
+    })
+      .then((response) => {
+        if (generation === renderRequestGeneration) {
+          completedRenderRequests.set(key, response);
+        }
+
+        return response;
+      })
+      .finally(() => {
+        pendingRenderRequests.delete(key);
+      });
+
+    pendingRenderRequests.set(key, request);
+    return request;
+  }
+
+  async function renderNavigationTargetPage(targetPage: number): Promise<boolean> {
+    if (!currentPdfPath) {
+      return false;
+    }
+
+    if (targetPage < 1 || targetPage > pageCount) {
+      return false;
+    }
+
+    if (targetPage <= loadedThroughPage) {
+      return true;
+    }
+
+    try {
+      statusText = `Preparing target page ${targetPage}...`;
+      const response = await renderSinglePdfPage(
+        currentPdfPath,
+        targetPage,
+        zoom,
+        renderDevicePixelRatio
+      );
+
+      renderedPages = mergeRenderedPages(renderedPages, [
+        {
+          page: response.page,
+          imagePath: response.image_path
+        }
+      ]);
+      pageCount = response.page_count;
+      zoom = response.zoom;
+
+      // Navigation target at the current boundary is promoted first.
+      if (response.page === loadedThroughPage + 1) {
+        loadedThroughPage = response.page;
+      }
+
+      return true;
+    } catch (error) {
+      const message = `PDF render error: ${formatError(error)}`;
+      renderError = message;
+      statusText = message;
+      return false;
+    }
   }
 
   function mergeRenderedPages(existingPages: RenderedPdfPage[], incomingPages: RenderedPdfPage[]): RenderedPdfPage[] {
@@ -182,6 +361,7 @@
     isRendering = true;
     renderError = null;
     const devicePixelRatio = getDevicePixelRatio();
+    beginRenderGeneration();
 
     try {
       statusText = "Rendering initial pages...";
@@ -261,7 +441,19 @@
     }
   }
 
-  async function ensurePageLoaded(targetPage: number): Promise<boolean> {
+  function handleLazyLoadNext(): void {
+    maybePrefetchAhead(Math.max(1, currentPage));
+  }
+
+  async function ensurePageLoaded(targetPage: number, prioritizeNavigationTarget: boolean = false): Promise<boolean> {
+    if (prioritizeNavigationTarget && targetPage === loadedThroughPage + 1) {
+      const prioritized = await renderNavigationTargetPage(targetPage);
+
+      if (!prioritized) {
+        return false;
+      }
+    }
+
     if (targetPage <= loadedThroughPage) {
       return true;
     }
@@ -289,6 +481,13 @@
     }
 
     const targetPage = basePage - 1;
+    const loaded = await ensurePageLoaded(targetPage, true);
+
+    if (!loaded) {
+      statusText = `Failed to prepare page ${targetPage}.`;
+      return;
+    }
+
     currentPage = targetPage;
     requestViewerScrollToPage(targetPage);
     statusText = `Jumped to page ${targetPage}.`;
@@ -307,7 +506,7 @@
     }
 
     const targetPage = basePage + 1;
-    const loaded = await ensurePageLoaded(targetPage);
+    const loaded = await ensurePageLoaded(targetPage, true);
 
     if (!loaded) {
       return;
@@ -416,7 +615,7 @@
     onNext={handleNextPage}
     onZoomIn={handleZoomIn}
     onZoomOut={handleZoomOut}
-    onLoadMore={loadNextPageWindow}
+    onLazyLoadNext={handleLazyLoadNext}
     onActivePageChange={handleActivePageChange}
   />
 

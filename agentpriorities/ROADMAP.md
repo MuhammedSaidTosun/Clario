@@ -34,11 +34,11 @@ Completed steps must remain working as later steps are added.
    - scrolling continues across pages
    - next / previous remain available
 
-5. Visible Page Tracking
+5. Visible Page Tracking ✅
    - determine active page during scroll
    - update page indicator accordingly
 
-6. Lazy Page Rendering
+6. Lazy Page Rendering ✅
    - render only visible and nearby pages
    - avoid rendering distant pages immediately
 
