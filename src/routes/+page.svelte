@@ -50,6 +50,7 @@
   const PREFETCH_TRIGGER_PAGES = 6;
   const PREFETCH_COOLDOWN_MS = 250;
   const NAVIGATION_TRANSITION_TIMEOUT_MS = 1500;
+  const ZOOM_PRIORITY_PAGE_RADIUS = 1;
 
   let selectedFilePath = $state("No file selected.");
   let debugDirs = $state<AppDirs | null>(null);
@@ -353,6 +354,121 @@
     };
   }
 
+  function computeZoomPriorityPages(focusPage: number, loadedThrough: number): number[] {
+    const clampedLoadedThrough = Math.max(1, loadedThrough);
+    const clampedFocusPage = Math.min(clampedLoadedThrough, Math.max(1, focusPage));
+    const pages = new Set<number>();
+
+    for (
+      let page = clampedFocusPage - ZOOM_PRIORITY_PAGE_RADIUS;
+      page <= clampedFocusPage + ZOOM_PRIORITY_PAGE_RADIUS;
+      page += 1
+    ) {
+      if (page >= 1 && page <= clampedLoadedThrough) {
+        pages.add(page);
+      }
+    }
+
+    return Array.from(pages.values()).sort((left, right) => left - right);
+  }
+
+  async function renderPageList(
+    filePath: string,
+    pagesToRender: number[],
+    zoomToRender: number,
+    devicePixelRatio: number,
+    stageLabel: string
+  ): Promise<{ pages: RenderedPdfPage[]; totalPages: number; resolvedZoom: number }> {
+    const nextPages: RenderedPdfPage[] = [];
+    let totalPages = pageCount;
+    let resolvedZoom = zoomToRender;
+
+    for (const page of pagesToRender) {
+      statusText = `${stageLabel} page ${page}${totalPages > 0 ? ` / ${totalPages}` : ""}...`;
+      const response = await renderSinglePdfPage(filePath, page, zoomToRender, devicePixelRatio);
+      totalPages = response.page_count;
+      resolvedZoom = response.zoom;
+      nextPages.push({
+        page: response.page,
+        imagePath: response.image_path
+      });
+    }
+
+    return {
+      pages: nextPages,
+      totalPages,
+      resolvedZoom
+    };
+  }
+
+  async function rerenderLoadedPagesForZoom(
+    filePath: string,
+    zoomToRender: number,
+    targetLoadedThrough: number,
+    preferredFocusPage: number
+  ): Promise<void> {
+    isRendering = true;
+    renderError = null;
+    const devicePixelRatio = getDevicePixelRatio();
+    beginRenderGeneration();
+
+    try {
+      const nextLoadedThrough = Math.min(pageCount, Math.max(1, targetLoadedThrough));
+      const focusPage = Math.min(nextLoadedThrough, Math.max(1, preferredFocusPage));
+      const priorityPages = computeZoomPriorityPages(focusPage, nextLoadedThrough);
+
+      const priorityResponse = await renderPageList(
+        filePath,
+        priorityPages,
+        zoomToRender,
+        devicePixelRatio,
+        "Zooming visible region:"
+      );
+
+      renderedPages = mergeRenderedPages(renderedPages, priorityResponse.pages);
+      pageCount = priorityResponse.totalPages;
+      zoom = priorityResponse.resolvedZoom;
+      renderDevicePixelRatio = devicePixelRatio;
+      loadedThroughPage = Math.min(nextLoadedThrough, priorityResponse.totalPages);
+
+      const priorityPagesSet = new Set(priorityPages);
+      const remainingPages: number[] = [];
+
+      for (let page = 1; page <= loadedThroughPage; page += 1) {
+        if (!priorityPagesSet.has(page)) {
+          remainingPages.push(page);
+        }
+      }
+
+      if (remainingPages.length > 0) {
+        const remainingResponse = await renderPageList(
+          filePath,
+          remainingPages,
+          zoomToRender,
+          devicePixelRatio,
+          "Refreshing remaining pages:"
+        );
+
+        renderedPages = mergeRenderedPages(renderedPages, remainingResponse.pages);
+        pageCount = remainingResponse.totalPages;
+        zoom = remainingResponse.resolvedZoom;
+        loadedThroughPage = Math.min(nextLoadedThrough, remainingResponse.totalPages);
+      }
+
+      if (currentPage < 1 || currentPage > pageCount) {
+        currentPage = Math.min(Math.max(1, currentPage), pageCount);
+      }
+
+      statusText = `Loaded pages 1-${loadedThroughPage} of ${pageCount} at ${zoom.toFixed(2)}x (visible region first).`;
+    } catch (error) {
+      const message = `PDF render error: ${formatError(error)}`;
+      renderError = message;
+      statusText = message;
+    } finally {
+      isRendering = false;
+    }
+  }
+
   async function renderPdfDocument(
     filePath: string,
     zoomToRender: number,
@@ -522,13 +638,14 @@
       return;
     }
 
+    const focusPage = currentPage;
     const nextZoom = Math.min(MAX_ZOOM, Number((zoom + ZOOM_STEP).toFixed(2)));
     if (nextZoom === zoom) {
       statusText = `Maximum zoom is ${MAX_ZOOM.toFixed(2)}x.`;
       return;
     }
 
-    await renderPdfDocument(currentPdfPath, nextZoom, loadedThroughPage);
+    await rerenderLoadedPagesForZoom(currentPdfPath, nextZoom, loadedThroughPage, focusPage);
   }
 
   async function handleZoomOut(): Promise<void> {
@@ -536,13 +653,14 @@
       return;
     }
 
+    const focusPage = currentPage;
     const nextZoom = Math.max(MIN_ZOOM, Number((zoom - ZOOM_STEP).toFixed(2)));
     if (nextZoom === zoom) {
       statusText = `Minimum zoom is ${MIN_ZOOM.toFixed(2)}x.`;
       return;
     }
 
-    await renderPdfDocument(currentPdfPath, nextZoom, loadedThroughPage);
+    await rerenderLoadedPagesForZoom(currentPdfPath, nextZoom, loadedThroughPage, focusPage);
   }
 
   onMount(async () => {

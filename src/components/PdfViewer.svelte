@@ -289,31 +289,54 @@
 
     const viewportRect = viewport.getBoundingClientRect();
     const pageElements = Array.from(viewport.querySelectorAll<HTMLElement>("[data-page]"));
+    const preferredPage = determineVisiblePage();
+    let targetElement: HTMLElement | null = null;
 
-    for (const pageElement of pageElements) {
-      const pageRect = pageElement.getBoundingClientRect();
-
-      if (pageRect.bottom <= viewportRect.top) {
-        continue;
-      }
-
-      const pageNumber = Number(pageElement.dataset.page);
-
-      if (!Number.isFinite(pageNumber)) {
-        continue;
-      }
-
-      const pageHeight = Math.max(1, pageRect.height);
-      const offsetPx = Math.max(0, viewportRect.top - pageRect.top);
-      const offsetRatio = Math.min(1, offsetPx / pageHeight);
-
-      return {
-        page: pageNumber,
-        offsetRatio
-      };
+    if (preferredPage !== null) {
+      targetElement =
+        pageElements.find((pageElement) => Number(pageElement.dataset.page) === preferredPage) ?? null;
     }
 
-    return null;
+    if (!targetElement) {
+      for (const pageElement of pageElements) {
+        const pageRect = pageElement.getBoundingClientRect();
+
+        if (pageRect.bottom <= viewportRect.top) {
+          continue;
+        }
+
+        const pageNumber = Number(pageElement.dataset.page);
+
+        if (!Number.isFinite(pageNumber)) {
+          continue;
+        }
+
+        targetElement = pageElement;
+        break;
+      }
+    }
+
+    if (!targetElement) {
+      return null;
+    }
+
+    const pageNumber = Number(targetElement.dataset.page);
+
+    if (!Number.isFinite(pageNumber)) {
+      return null;
+    }
+
+    const pageRect = targetElement.getBoundingClientRect();
+    const pageHeight = Math.max(1, pageRect.height);
+    const readingLineY = viewportRect.top + viewportRect.height * 0.35;
+    const rawOffsetPx = readingLineY - pageRect.top;
+    const offsetPx = Math.min(pageHeight, Math.max(0, rawOffsetPx));
+    const offsetRatio = Math.min(1, offsetPx / pageHeight);
+
+    return {
+      page: pageNumber,
+      offsetRatio
+    };
   }
 
   function restoreReadingAnchor(anchor: ReadingAnchor, behavior: ScrollBehavior): boolean {
@@ -353,6 +376,7 @@
     renderedPages;
     logicalPageSizeByNumber;
     fitMode;
+    isBusy;
     const anchor = pendingReadingAnchor;
 
     if (!anchor) {
@@ -366,7 +390,7 @@
         reportActivePage(anchor.page);
       }
 
-      if (restored && pendingReadingAnchor === anchor) {
+      if (restored && pendingReadingAnchor === anchor && !isBusy) {
         pendingReadingAnchor = null;
       }
     });
