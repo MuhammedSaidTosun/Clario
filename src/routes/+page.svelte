@@ -51,6 +51,11 @@
   const PREFETCH_COOLDOWN_MS = 250;
   const NAVIGATION_TRANSITION_TIMEOUT_MS = 1500;
   const ZOOM_PRIORITY_PAGE_RADIUS = 1;
+  const ZOOM_PHASE_B_IMMEDIATE_LIMIT = 6;
+  const ZOOM_DEFERRED_NEAR_ACTIVE_RADIUS = 4;
+  const ZOOM_DEFERRED_BATCH_SIZE = 2;
+  const ZOOM_DEFERRED_TRIGGER_MIN_MOVEMENT_PAGES = 2;
+  const ZOOM_DEFERRED_TRIGGER_COOLDOWN_MS = 300;
 
   let selectedFilePath = $state("No file selected.");
   let debugDirs = $state<AppDirs | null>(null);
@@ -72,6 +77,11 @@
   let renderRequestGeneration = 0;
   let pendingRenderRequests = new Map<string, Promise<PdfPageRenderResponse>>();
   let completedRenderRequests = new Map<string, PdfPageRenderResponse>();
+  let deferredZoomRefreshPages = $state<Set<number>>(new Set());
+  let isDeferredZoomRefreshRunning = $state(false);
+  let lastDeferredTriggerPage = $state<number | null>(null);
+  let lastDeferredTriggerAtMs = $state(0);
+  let hadDeferredInActiveWindow = $state(false);
 
   function formatError(error: unknown): string {
     if (error instanceof Error) {
@@ -105,6 +115,14 @@
     return Number(clamped.toFixed(2));
   }
 
+  function resetDeferredZoomRefreshState(): void {
+    deferredZoomRefreshPages = new Set();
+    isDeferredZoomRefreshRunning = false;
+    lastDeferredTriggerPage = null;
+    lastDeferredTriggerAtMs = 0;
+    hadDeferredInActiveWindow = false;
+  }
+
   function resetPdfState(pdfPath: string): void {
     currentPdfPath = pdfPath;
     // The UI and backend command API are both 1-based for page indexing.
@@ -119,6 +137,7 @@
     lastPrefetchAt = 0;
     pendingRenderRequests.clear();
     completedRenderRequests.clear();
+    resetDeferredZoomRefreshState();
   }
 
   function normalizeForKey(value: number): number {
@@ -143,6 +162,7 @@
     renderRequestGeneration += 1;
     pendingRenderRequests.clear();
     completedRenderRequests.clear();
+    resetDeferredZoomRefreshState();
   }
 
   function requestViewerScrollToPage(page: number): void {
@@ -215,6 +235,7 @@
     }
 
     maybePrefetchAhead(page);
+    void maybeRefreshDeferredPagesNearActive(page);
   }
 
   async function renderSinglePdfPage(
@@ -372,6 +393,51 @@
     return Array.from(pages.values()).sort((left, right) => left - right);
   }
 
+  function splitRemainingPagesForBoundedPhaseB(
+    remainingPages: number[],
+    focusPage: number
+  ): { immediatePages: number[]; deferredPages: number[] } {
+    if (remainingPages.length <= ZOOM_PHASE_B_IMMEDIATE_LIMIT) {
+      return {
+        immediatePages: remainingPages,
+        deferredPages: []
+      };
+    }
+
+    const prioritized = [...remainingPages].sort((left, right) => {
+      const leftDistance = Math.abs(left - focusPage);
+      const rightDistance = Math.abs(right - focusPage);
+
+      if (leftDistance !== rightDistance) {
+        return leftDistance - rightDistance;
+      }
+
+      return left - right;
+    });
+    const immediateSet = new Set(prioritized.slice(0, ZOOM_PHASE_B_IMMEDIATE_LIMIT));
+    const immediatePages = remainingPages.filter((page) => immediateSet.has(page));
+    const deferredPages = remainingPages.filter((page) => !immediateSet.has(page));
+
+    return {
+      immediatePages,
+      deferredPages
+    };
+  }
+
+  function deferredPagesInActiveWindow(activePage: number): number[] {
+    const windowStart = Math.max(1, activePage);
+    const windowEnd = Math.min(loadedThroughPage, activePage + ZOOM_DEFERRED_NEAR_ACTIVE_RADIUS);
+    const pages: number[] = [];
+
+    for (const page of deferredZoomRefreshPages.values()) {
+      if (page >= windowStart && page <= windowEnd) {
+        pages.push(page);
+      }
+    }
+
+    return pages.sort((left, right) => left - right);
+  }
+
   async function renderPageList(
     filePath: string,
     pagesToRender: number[],
@@ -440,13 +506,15 @@
         }
       }
 
-      if (remainingPages.length > 0) {
+      const phaseB = splitRemainingPagesForBoundedPhaseB(remainingPages, focusPage);
+
+      if (phaseB.immediatePages.length > 0) {
         const remainingResponse = await renderPageList(
           filePath,
-          remainingPages,
+          phaseB.immediatePages,
           zoomToRender,
           devicePixelRatio,
-          "Refreshing remaining pages:"
+          "Refreshing nearby loaded pages:"
         );
 
         renderedPages = mergeRenderedPages(renderedPages, remainingResponse.pages);
@@ -455,17 +523,103 @@
         loadedThroughPage = Math.min(nextLoadedThrough, remainingResponse.totalPages);
       }
 
+      deferredZoomRefreshPages = new Set(phaseB.deferredPages);
+      hadDeferredInActiveWindow = false;
+
       if (currentPage < 1 || currentPage > pageCount) {
         currentPage = Math.min(Math.max(1, currentPage), pageCount);
       }
 
-      statusText = `Loaded pages 1-${loadedThroughPage} of ${pageCount} at ${zoom.toFixed(2)}x (visible region first).`;
+      const deferredCount = deferredZoomRefreshPages.size;
+      statusText =
+        deferredCount > 0
+          ? `Loaded pages 1-${loadedThroughPage} of ${pageCount} at ${zoom.toFixed(2)}x (visible first, ${deferredCount} deferred).`
+          : `Loaded pages 1-${loadedThroughPage} of ${pageCount} at ${zoom.toFixed(2)}x (visible region first).`;
     } catch (error) {
       const message = `PDF render error: ${formatError(error)}`;
       renderError = message;
       statusText = message;
     } finally {
       isRendering = false;
+    }
+  }
+
+  async function maybeRefreshDeferredPagesNearActive(activePage: number): Promise<void> {
+    if (!currentPdfPath || isRendering || isDeferredZoomRefreshRunning) {
+      return;
+    }
+
+    if (deferredZoomRefreshPages.size < 1) {
+      hadDeferredInActiveWindow = false;
+      return;
+    }
+
+    const pagesInWindow = deferredPagesInActiveWindow(activePage);
+    const hasDeferredInWindow = pagesInWindow.length > 0;
+    const newlyEnteredWindow = !hadDeferredInActiveWindow && hasDeferredInWindow;
+    hadDeferredInActiveWindow = hasDeferredInWindow;
+
+    if (!hasDeferredInWindow) {
+      return;
+    }
+
+    const movedEnough =
+      lastDeferredTriggerPage === null ||
+      Math.abs(activePage - lastDeferredTriggerPage) >= ZOOM_DEFERRED_TRIGGER_MIN_MOVEMENT_PAGES;
+
+    if (!movedEnough && !newlyEnteredWindow) {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (now - lastDeferredTriggerAtMs < ZOOM_DEFERRED_TRIGGER_COOLDOWN_MS) {
+      return;
+    }
+
+    const pagesToRender = pagesInWindow.slice(0, ZOOM_DEFERRED_BATCH_SIZE);
+
+    if (pagesToRender.length < 1) {
+      return;
+    }
+
+    const generation = renderRequestGeneration;
+    isDeferredZoomRefreshRunning = true;
+    lastDeferredTriggerAtMs = now;
+    lastDeferredTriggerPage = activePage;
+
+    try {
+      const response = await renderPageList(
+        currentPdfPath,
+        pagesToRender,
+        zoom,
+        renderDevicePixelRatio,
+        "Refreshing deferred pages:"
+      );
+
+      if (generation !== renderRequestGeneration) {
+        return;
+      }
+
+      renderedPages = mergeRenderedPages(renderedPages, response.pages);
+      pageCount = response.totalPages;
+      zoom = response.resolvedZoom;
+      loadedThroughPage = Math.min(loadedThroughPage, response.totalPages);
+
+      const nextDeferred = new Set(deferredZoomRefreshPages);
+
+      for (const page of pagesToRender) {
+        nextDeferred.delete(page);
+      }
+
+      deferredZoomRefreshPages = nextDeferred;
+      hadDeferredInActiveWindow = deferredPagesInActiveWindow(activePage).length > 0;
+    } catch (error) {
+      const message = `PDF render error: ${formatError(error)}`;
+      renderError = message;
+      statusText = message;
+    } finally {
+      isDeferredZoomRefreshRunning = false;
     }
   }
 
