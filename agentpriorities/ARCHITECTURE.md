@@ -1,202 +1,141 @@
-
----
-
-# `ARCHITECTURE.md`
-
-```md
 # ARCHITECTURE.md
 
-This document describes the architecture of the application.
+Architecture source of truth for this offline Tauri + Rust + Svelte application.
+
+This document defines ownership boundaries and system constraints.
+It must stay compatible with roadmap order.
+
+## Architectural Principles
+- Offline-first on macOS, Windows, Linux
+- Modular layers with explicit ownership
+- Incremental evolution (no broad rewrites during active reader hardening)
+- Viewport-first responsiveness over global eager consistency
 
 ---
 
-# Overview
+## 1. Layer Model
 
-The application consists of five main layers:
+### UI Layer (Svelte)
+Owns:
+- layout and presentation
+- viewer composition and scroll structure
+- viewport measurement and visible-band state
+- mounted-window and placeholder/spacer decisions
+- interaction state (scroll, gesture, navigation transitions)
 
-1. UI Layer
-2. Reader Engine Layer
-3. Editor Layer
-4. Conversion Layer
-5. Persistence / Save Layer
+Does not own:
+- PDF parsing
+- page rendering engine internals
+- conversion pipelines
+- save/flatten pipelines
+- heavy backend-like orchestration systems
 
-Each layer must evolve incrementally and remain compatible with the roadmap order.
+### Reader Engine Layer (Rust)
+Owns:
+- PDF opening/parsing primitives
+- page rendering
+- render output and cache primitives
+- backend command handlers
+- rendering performance primitives
 
----
+Does not move to UI:
+- render ownership
+- PDF rendering correctness logic
 
-# UI Layer
+### Editor Layer (Rust + Svelte, Future)
+- Builds on reader output
+- Adds overlay/interactions without replacing reader rendering
 
-Technology:
-- Svelte
+### Conversion Layer (Rust, Future)
+- Import/export engines remain separate from reader interaction loop
 
-Responsibilities:
-- rendering the interface
-- user interaction
-- displaying PDF pages
-- viewer controls
-- editor overlays
-- reader layout modes
-- status and debug feedback
-
-Important components:
-- `Toolbar`
-- `Sidebar`
-- `PdfViewer`
-
-The UI layer must not own heavy rendering, parsing, or conversion logic.
-
----
-
-# Reader Engine Layer
-
-Technology:
-- Rust
-
-Responsibilities:
-- PDF rendering
-- page image generation
-- cache-aware page rendering
-- file management
-- command handling
-- page navigation support
-- reader performance primitives
-
-Important modules:
-- `commands/`
-- `pdf/`
-
-This layer is responsible for opening PDFs and rendering pages for the viewer.
+### Persistence Layer (Rust, Future)
+- Overlay save, flatten save, export outputs
 
 ---
 
-# Editor Layer
+## 2. Boundary Contract
 
-Technology:
-- Rust + Svelte
+Svelte <-> Rust boundary:
+- Tauri commands only
 
-Responsibilities:
-- DocumentIR-based editing state
-- overlay system
-- object selection
-- annotations
-- editing tools
-- undo / redo
-
-Editing must follow a layered model:
-
-1. PDF render layer
-2. interaction / overlay layer
-3. UI control layer
-
-User changes update the shared document model.
+Contract intent:
+- UI decides what is worth requesting now (viewport/presentation priorities)
+- Rust executes rendering and returns outputs
+- UI never re-implements rendering ownership
 
 ---
 
-# Conversion Layer
+## 3. Reader Architecture (Current Direction)
 
-Technology:
-- Rust
+Phase 1 Step 7 is active.
+Reader architecture must stay aligned to these rules.
 
-Responsibilities:
-- importing formats
-- exporting formats
-- layout engine
-- document transformation
-- format-specific adapters
+### 3.1 Viewport-First Decision Model
+- Prioritize the active visible region and nearby pages.
+- Avoid broad global synchronization when it hurts interaction latency.
+- Local visible correctness has higher priority than far-page freshness.
 
-Converters:
-- TXT converter
-- MD converter
-- EPUB converter
-- DOCX converter
-- PPTX converter
+### 3.2 Virtualized Continuous Scroll Model
+- Keep only a small mounted page-image window around viewport.
+- Preserve continuity with spacers/placeholders/page shells.
+- Do not mount full loaded ranges as active images.
+- Temporarily stale far pages are acceptable when bounded and recoverable.
 
-This layer is the long-term core of the converter engine.
+### 3.3 Stale-Work Suppression
+- Obsolete work may be dropped/superseded.
+- Dedup equivalent render intents.
+- Prefer responsiveness over completing stale global work.
 
----
+### 3.4 Navigation Stability
+- Programmatic next/previous must keep navigation targets stable.
+- Prevent indicator flicker from stale intermediate updates.
 
-# Persistence / Save Layer
+### 3.5 Zoom Architecture Policy (Pinch-First)
+Target behavior:
+- immediate visual zoom feedback during gesture
+- deferred bounded real rerender after gesture settles
+- visible-band rerender priority before distant catch-up
 
-Technology:
-- Rust
+Steady-state requirement:
+- mixed zoom-state pages in active visible band are unacceptable
 
-Responsibilities:
-- overlay save
-- flatten save
-- export file generation
-- cache file persistence
-- output file consistency
-
-Two save modes exist:
-
-## Overlay Save
-Keeps the original PDF and writes edits/annotations on top.
-
-## Flatten Save
-Renders pages to images and rebuilds the PDF for compatibility.
+Non-goal:
+- broad full-range rerender as the default zoom consistency mechanism
 
 ---
 
-# Document Model
+## 4. Discouraged Architectural Patterns
+Do not introduce reader-wide systems that centralize excessive orchestration, including:
+- heavy global render queues
+- broad orchestration hubs/controllers
+- large task state machines coordinating the full document
 
-All editable document data must be stored in:
-
-`DocumentIR`
-
-`DocumentIR` is the single source of truth between:
-
-UI ↔ Rust
-
-It will be introduced in the editor phase and used for later editing and conversion workflows.
-
----
-
-# Data Flow
-
-## Reader flow
-PDF → Rust PDF engine → rendered page image → Svelte viewer
-
-## Import flow
-File → Parser → DocumentIR / layout model → PDF
-
-## Export flow
-PDF → Extraction → Converter → Target Format
+Reason:
+- they increase latency and complexity,
+- conflict with viewport-first bounded behavior,
+- and raise regression risk during Step 7 hardening.
 
 ---
 
-# Rendering
+## 5. Data Flow (Current + Future)
 
-PDF pages are rendered using a Rust PDF engine.
+Reader flow:
+- PDF -> Rust reader engine -> rendered page output -> Svelte viewer
 
-Rendered pages are displayed in the Svelte viewer.
+Future editor flow:
+- reader render layer + overlay interaction layer + editor controls
 
-Current rendering principles:
-- backend-controlled rendering
-- cache-backed page output
-- high-DPI-aware rendering
-- lossless page output where required for quality
-
----
-
-# Continuous Reading Model
-
-The reader will evolve from:
-- single-page navigation
-
-toward:
-- continuous scroll viewer
-- visible page tracking
-- lazy page rendering
-- prefetch and render queue support
-
-These are reader-layer concerns, not editor concerns.
+Future conversion flow:
+- format parser/extractor -> Rust conversion pipeline -> output format
 
 ---
 
-# Architecture Rules
-
-1. Rust owns rendering, parsing, conversion, and save logic.
-2. Svelte owns layout, controls, and presentation.
-3. Tauri commands are the backend boundary.
-4. The reader and converter systems must remain separable.
-5. The editor system must build on top of the reader, not replace it.
+## 6. Architecture Rules (Non-Negotiable)
+1. Rust owns rendering, parsing, conversion, and persistence logic.
+2. Svelte owns layout, presentation, interaction, and viewport-driven request policy.
+3. Tauri commands are the only app-layer boundary.
+4. Virtualization is part of intended reader architecture and must be preserved.
+5. Viewport-first bounded behavior is preferred over global eager consistency.
+6. Step 7 reader hardening must not be used to start Step 8+ scope.
+7. Reader changes must avoid heavy queue/orchestration expansion.

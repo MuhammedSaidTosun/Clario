@@ -1,181 +1,170 @@
 # ROADMAP.md
 
-This file defines the development order of the project.
+Sequential development roadmap for this repository.
 
-The steps must be followed sequentially.
+Core rules:
+- Follow steps in order.
+- Do not skip steps.
+- Do not start a later step before current step exit criteria are met.
+- Keep the app fully offline on macOS, Windows, and Linux.
 
-Completed steps must remain working as later steps are added.
-
----
-
-# Phase 1 — Reader Core
-
-1. Repo + App Skeleton ✅
-   - Tauri + Svelte setup
-   - Rust command infrastructure
-   - temp / cache / log directories
-   - open file flow
-
-2. PDF Reader MVP ✅
-   - PDFium integration
-   - open PDF
-   - render page
-   - next / previous
-   - zoom
-
-3. Reader Performance + Viewer Layout ✅
-   - render cache
-   - fit to width
-   - fit to page
-   - improved viewer layout
-
-4. Continuous Scroll Viewer ✅
-   - pages displayed vertically
-   - scrolling continues across pages
-   - next / previous remain available
-
-5. Visible Page Tracking ✅
-   - determine active page during scroll
-   - update page indicator accordingly
-
-6. Lazy Page Rendering ✅
-   - render only visible and nearby pages
-   - avoid rendering distant pages immediately
-
-7. Prefetch + Render Queue
-   - pre-render nearby pages
-   - serialize and control render work
-
-8. Text Layer Extraction
-   - extract selectable text layer from PDFs
-   - prepare for copy/search workflows
-
-9. Search in PDF
-   - search text
-   - navigate matches
-   - highlight results in viewer
-
-Goal:
-A strong, usable, high-quality PDF reader.
+## Current Status (Authoritative)
+- Active phase: Phase 1 (Reader Core)
+- Active step: Step 7 (Reader Performance Hardening)
+- Active sub-focus: Step 7.7 (Zoom UX + Visible-Band Consistency)
+- Step 8+: NOT STARTED and blocked until Step 7 exit criteria pass
 
 ---
 
-# Phase 2 — Editor Foundations
+## Phase 1 - Reader Core
+Goal: stable, responsive PDF reader foundation for all later work.
 
-10. DocumentIR / Internal Editing Model
-    - single source of truth for document editing state
+### 1. Repo + App Skeleton (Completed)
+- Tauri + Svelte bootstrap
+- Rust command infrastructure
+- temp/cache/log directories
+- open-file flow
 
-11. Overlay Layer System
-    - separate editable overlay above rendered PDF pages
+### 2. PDF Reader MVP (Completed)
+- PDFium integration
+- open PDF
+- render page
+- previous/next navigation
+- basic zoom
 
-12. Selection Engine
-    - select page objects
-    - bounding boxes
-    - handles
-    - active object tracking
+### 3. Reader Performance + Viewer Layout (Completed)
+- render cache
+- fit-to-width
+- fit-to-page
+- improved viewer layout
 
-13. Annotation System
-    - highlight
-    - underline
-    - notes
-    - freehand drawing
+### 4. Continuous Scroll Viewer (Completed)
+- vertical continuous page flow
+- scroll continuity across pages
+- previous/next still available
 
-14. Basic Editing Tools
-    - text box
-    - image placement
-    - shape placement
-    - move / resize
+### 5. Visible Page Tracking (Completed)
+- active page detection during scroll
+- page indicator updates
 
-15. Undo / Redo System
-    - reversible editor operations
+### 6. Lazy Page Rendering (Completed)
+- render visible/nearby pages first
+- defer far-page work
 
-16. Save Pipeline — Overlay Save
-    - preserve original PDF
-    - write annotation/edit overlay data
+### 7. Reader Performance Hardening (In Progress)
+Scope: viewport-first responsiveness, safer zoom, render work hardening, and virtualization-safe behavior.
 
-17. Save Pipeline — Flatten Save
-    - flatten pages when compatibility is needed
+#### 7.1 Light Prefetch (Completed)
+- nearby page prefetch only
+- no aggressive global speculative work
+- keep visible region priority
 
-Goal:
-Editable PDF documents built on top of the reader.
+#### 7.2 Render Dedup (Completed)
+- deduplicate equivalent render requests
+- suppress unnecessary repeated work
 
----
+#### 7.3 Navigation Target Stabilization (Completed)
+- stabilize active page target during programmatic navigation
+- prevent flicker from stale tracking updates
 
-# Phase 3 — Export From PDF
+#### 7.4 Safer Zoom with Visible-Pages-First (Completed)
+- prioritize visible pages during zoom transitions
+- avoid broad rerender behavior when bounded alternatives work
 
-18. PDF → TXT
-    - strong extraction for own PDFs
-    - best-effort extraction for external PDFs
+#### 7.5 Bounded Scheduling / Hardening (Completed)
+- cap frontend scheduling pressure
+- suppress stale non-essential work
+- keep interaction latency ahead of global refresh eagerness
 
-19. PDF → MD
-    - text extraction plus markdown structure
+#### 7.6 Virtualization Hardening (Implemented, Ongoing Polish)
+- keep a small mounted page-image window around viewport
+- preserve continuous flow with spacers/placeholders
+- allow temporarily stale far pages when needed
+- do not revert to mounting full loaded spans as active images
 
-20. PDF → EPUB
-    - fixed-layout EPUB
-    - reflowable EPUB
+#### 7.7 Zoom UX + Visible-Band Consistency (Current Focus)
+- pinch-first zoom direction
+- immediate visual zoom during gesture
+- deferred bounded real rerender after gesture settle
+- preserve virtualization while converging visible band to consistent zoom state
+- unacceptable steady state: mixed zoom-state pages inside active visible band
 
-21. PDF → DOCX / PPTX (Fidelity Mode)
-    - preserve appearance through fidelity-oriented export
+#### 7.8 Step 7 Completion Sweep (Pending)
+- finalize tuning across fast scroll, pinch zoom, and programmatic navigation
+- remove/adjust conflicting zoom controls only if they hurt pinch-first model
+- validate no regressions to Steps 1-6 behavior
 
-Goal:
-Export PDF content into supported output formats.
+### Step 7 Exit Criteria (Gate for Step 8)
+All items must be true before Step 8 starts:
+- fast scrolling remains responsive without major freezes
+- visible-region-first behavior remains the default
+- virtualization is active and preserved
+- small mounted window around viewport is maintained
+- stale far pages may exist temporarily without UX collapse
+- no unacceptable mixed zoom-state steady state in active visible band
+- navigation target stabilization remains intact
+- no heavy global render queues/orchestration introduced
+- no regressions in completed Steps 1-6
 
----
+### 8. Text Layer Extraction (Blocked)
+- extract selectable text layer from PDFs
+- prepare copy/search foundations
 
-# Phase 4 — Import To PDF
-
-22. TXT → PDF Engine
-    - internal layout engine path
-
-23. MD → PDF Engine
-    - markdown parsing
-    - layout
-    - PDF output
-
-24. EPUB → PDF Engine
-    - EPUB parse
-    - HTML/intermediate layout
-    - PDF output
-
-25. PPTX → PDF Engine
-    - slide-based positioned rendering
-
-26. DOCX → PDF Engine
-    - paragraph / run / table / image / pagination handling
-
-Goal:
-Import supported document formats into PDF through the app’s own conversion engine.
-
----
-
-# Phase 5 — Unified Converter
-
-27. Unified Conversion API
-    - one conversion service for:
-      - import
-      - export
-      - mode control
-
-28. Batch Conversion Pipeline
-    - multiple-file conversion flow
-
-29. CLI / Automation Support
-    - command-line access to conversion engine
-
-30. Packaging + Cross-Platform Runtime Bundling
-    - macOS
-    - Windows
-    - Linux
-    - PDFium runtime management
-    - stable distribution packaging
-
-Goal:
-A complete cross-platform offline document conversion platform.
+### 9. Search in PDF (Blocked)
+- search text
+- navigate matches
+- highlight match results
 
 ---
 
-# Rule
+## Phase 2 - Editor Foundations (Not Started)
+Goal: editable PDF workflows layered on top of reader architecture.
 
-No step may be skipped.
+### 10. DocumentIR / Internal Editing Model
+### 11. Overlay Layer System
+### 12. Selection Engine
+### 13. Annotation System
+### 14. Basic Editing Tools
+### 15. Undo / Redo System
+### 16. Save Pipeline - Overlay Save
+### 17. Save Pipeline - Flatten Save
 
-Each phase must produce a working result before moving forward.
+---
+
+## Phase 3 - Export From PDF (Not Started)
+Goal: export PDF content into supported formats.
+
+### 18. PDF -> TXT
+### 19. PDF -> MD
+### 20. PDF -> EPUB
+### 21. PDF -> DOCX / PPTX (Fidelity Mode)
+
+---
+
+## Phase 4 - Import To PDF (Not Started)
+Goal: import supported formats and generate PDF offline.
+
+### 22. TXT -> PDF Engine
+### 23. MD -> PDF Engine
+### 24. EPUB -> PDF Engine
+### 25. PPTX -> PDF Engine
+### 26. DOCX -> PDF Engine
+
+---
+
+## Phase 5 - Unified Converter (Not Started)
+Goal: unified cross-platform offline conversion platform.
+
+### 27. Unified Conversion API
+### 28. Batch Conversion Pipeline
+### 29. CLI / Automation Support
+### 30. Packaging + Cross-Platform Runtime Bundling
+
+---
+
+## Non-Negotiable Guardrails
+- Do not start Step 8+ while Step 7 is active.
+- Do not shift rendering ownership from Rust to Svelte.
+- Do not replace virtualization with full-range mounted image spans.
+- Do not solve zoom consistency via broad full-range rerenders.
+- Do not introduce heavy global queue/orchestration systems for reader flow.

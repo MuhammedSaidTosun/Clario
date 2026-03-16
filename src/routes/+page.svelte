@@ -46,16 +46,28 @@
   const MIN_DEVICE_PIXEL_RATIO = 1;
   const MAX_DEVICE_PIXEL_RATIO = 4;
   const INITIAL_RENDER_WINDOW_SIZE = 24;
-  const LOAD_MORE_WINDOW_SIZE = 8;
-  const PREFETCH_TRIGGER_PAGES = 6;
-  const PREFETCH_COOLDOWN_MS = 250;
+  const LOAD_MORE_WINDOW_SIZE = 6;
+  const PREFETCH_TRIGGER_PAGES = 7;
+  const PREFETCH_COOLDOWN_MS = 280;
+  const PREFETCH_MIN_BATCH_SIZE = 2;
+  const PREFETCH_MAX_BATCH_SIZE = 4;
+  const PREFETCH_MAX_TRIGGER_PAGES = 9;
+  const PREFETCH_FORWARD_STREAK_CAP = 8;
+  const PREFETCH_BACKOFF_REVERSE_RADIUS = 1;
+  const PREFETCH_FAST_SCROLL_EVENT_INTERVAL_MS = 140;
+  const PREFETCH_FAST_SCROLL_FORWARD_STEP_THRESHOLD = 2;
+  const PREFETCH_FAST_SCROLL_BACKOFF_MS = 700;
+  const PREFETCH_FAST_SCROLL_MIN_AHEAD_PAGES = 1;
   const NAVIGATION_TRANSITION_TIMEOUT_MS = 1500;
   const ZOOM_PRIORITY_PAGE_RADIUS = 1;
-  const ZOOM_PHASE_B_IMMEDIATE_LIMIT = 6;
-  const ZOOM_DEFERRED_NEAR_ACTIVE_RADIUS = 4;
+  const ZOOM_PHASE_B_IMMEDIATE_LIMIT = 3;
+  const ZOOM_DEFERRED_NEAR_ACTIVE_RADIUS = 2;
   const ZOOM_DEFERRED_BATCH_SIZE = 2;
   const ZOOM_DEFERRED_TRIGGER_MIN_MOVEMENT_PAGES = 2;
   const ZOOM_DEFERRED_TRIGGER_COOLDOWN_MS = 300;
+  const ZOOM_OUT_REVERSE_POLISH_RADIUS = 2;
+  const ZOOM_OUT_REVERSE_POLISH_MAX_TRIGGERS = 3;
+  const ZOOM_OUT_REVERSE_POLISH_WINDOW_MS = 6000;
 
   let selectedFilePath = $state("No file selected.");
   let debugDirs = $state<AppDirs | null>(null);
@@ -73,6 +85,11 @@
   let renderError = $state<string | null>(null);
   let isRendering = $state(false);
   let lastPrefetchAt = 0;
+  let lastPrefetchObservedPage = 1;
+  let forwardReadStreak = 0;
+  let lastActivePageChangeAtMs = 0;
+  let fastForwardPrefetchBackoffUntilMs = 0;
+  let nonEssentialWorkEpoch = 0;
   let navigationTransition = $state<NavigationTransition | null>(null);
   let renderRequestGeneration = 0;
   let pendingRenderRequests = new Map<string, Promise<PdfPageRenderResponse>>();
@@ -82,6 +99,8 @@
   let lastDeferredTriggerPage = $state<number | null>(null);
   let lastDeferredTriggerAtMs = $state(0);
   let hadDeferredInActiveWindow = $state(false);
+  let lastZoomOutAtMs = $state(0);
+  let zoomOutReversePolishTriggersRemaining = $state(0);
 
   function formatError(error: unknown): string {
     if (error instanceof Error) {
@@ -121,6 +140,8 @@
     lastDeferredTriggerPage = null;
     lastDeferredTriggerAtMs = 0;
     hadDeferredInActiveWindow = false;
+    lastZoomOutAtMs = 0;
+    zoomOutReversePolishTriggersRemaining = 0;
   }
 
   function resetPdfState(pdfPath: string): void {
@@ -135,6 +156,11 @@
     navigationTransition = null;
     renderError = null;
     lastPrefetchAt = 0;
+    lastPrefetchObservedPage = 1;
+    forwardReadStreak = 0;
+    lastActivePageChangeAtMs = 0;
+    fastForwardPrefetchBackoffUntilMs = 0;
+    nonEssentialWorkEpoch = 0;
     pendingRenderRequests.clear();
     completedRenderRequests.clear();
     resetDeferredZoomRefreshState();
@@ -180,8 +206,29 @@
     };
   }
 
-  function maybePrefetchAhead(focusPage: number): void {
+  function prefetchBatchSizeForMovement(forwardMovement: number): number {
+    const movementContribution = Math.min(2, Math.max(0, forwardMovement));
+    const streakContribution = Math.floor(Math.min(forwardReadStreak, PREFETCH_FORWARD_STREAK_CAP) / 3);
+
+    return Math.min(
+      PREFETCH_MAX_BATCH_SIZE,
+      Math.max(PREFETCH_MIN_BATCH_SIZE, PREFETCH_MIN_BATCH_SIZE + movementContribution + streakContribution)
+    );
+  }
+
+  function maybePrefetchAhead(
+    focusPage: number,
+    movementOverride: number | null = null,
+    nowOverrideMs: number | null = null
+  ): void {
     if (!currentPdfPath || isRendering || pageCount < 1) {
+      return;
+    }
+
+    if (
+      isDeferredZoomRefreshRunning ||
+      deferredPagesInActiveWindow(focusPage, PREFETCH_BACKOFF_REVERSE_RADIUS).length > 0
+    ) {
       return;
     }
 
@@ -189,20 +236,46 @@
       return;
     }
 
-    const remainingLoadedAhead = loadedThroughPage - focusPage;
+    const movement = movementOverride ?? focusPage - lastPrefetchObservedPage;
+    lastPrefetchObservedPage = focusPage;
 
-    if (remainingLoadedAhead > PREFETCH_TRIGGER_PAGES) {
+    if (movement > 0) {
+      forwardReadStreak = Math.min(PREFETCH_FORWARD_STREAK_CAP, forwardReadStreak + movement);
+    } else if (movement < 0) {
+      forwardReadStreak = 0;
       return;
     }
 
-    const now = Date.now();
+    const remainingLoadedAhead = loadedThroughPage - focusPage;
+    const now = nowOverrideMs ?? Date.now();
+    const isFastForwardBackoffActive = movement > 0 && now < fastForwardPrefetchBackoffUntilMs;
+
+    if (isFastForwardBackoffActive && remainingLoadedAhead > PREFETCH_FAST_SCROLL_MIN_AHEAD_PAGES) {
+      return;
+    }
+
+    const dynamicTrigger = Math.min(
+      PREFETCH_MAX_TRIGGER_PAGES,
+      PREFETCH_TRIGGER_PAGES + Math.floor(forwardReadStreak / 2)
+    );
+
+    if (remainingLoadedAhead > dynamicTrigger) {
+      return;
+    }
+
+    if (movement <= 0 && remainingLoadedAhead > PREFETCH_TRIGGER_PAGES) {
+      return;
+    }
 
     if (now - lastPrefetchAt < PREFETCH_COOLDOWN_MS) {
       return;
     }
 
     lastPrefetchAt = now;
-    void loadNextPageWindow();
+    const batchSize = isFastForwardBackoffActive
+      ? 1
+      : prefetchBatchSizeForMovement(movement);
+    void loadNextPageWindow(batchSize, "prefetch", nonEssentialWorkEpoch);
   }
 
   function handleActivePageChange(page: number): void {
@@ -230,12 +303,28 @@
       }
     }
 
+    const movement = page - currentPage;
+
+    const now = Date.now();
+    const elapsedSinceLastActiveChange =
+      lastActivePageChangeAtMs > 0 ? now - lastActivePageChangeAtMs : Number.POSITIVE_INFINITY;
+    lastActivePageChangeAtMs = now;
+
+    if (
+      movement > 0 &&
+      (movement >= PREFETCH_FAST_SCROLL_FORWARD_STEP_THRESHOLD ||
+        elapsedSinceLastActiveChange <= PREFETCH_FAST_SCROLL_EVENT_INTERVAL_MS)
+    ) {
+      fastForwardPrefetchBackoffUntilMs = now + PREFETCH_FAST_SCROLL_BACKOFF_MS;
+      nonEssentialWorkEpoch += 1;
+    }
+
     if (currentPage !== page) {
       currentPage = page;
     }
 
-    maybePrefetchAhead(page);
-    void maybeRefreshDeferredPagesNearActive(page);
+    maybePrefetchAhead(page, movement, now);
+    void maybeRefreshDeferredPagesNearActive(page, movement);
   }
 
   async function renderSinglePdfPage(
@@ -424,8 +513,8 @@
     };
   }
 
-  function deferredPagesInActiveWindow(activePage: number): number[] {
-    const windowStart = Math.max(1, activePage);
+  function deferredPagesInActiveWindow(activePage: number, reverseRadius: number = 0): number[] {
+    const windowStart = Math.max(1, activePage - Math.max(0, reverseRadius));
     const windowEnd = Math.min(loadedThroughPage, activePage + ZOOM_DEFERRED_NEAR_ACTIVE_RADIUS);
     const pages: number[] = [];
 
@@ -436,6 +525,19 @@
     }
 
     return pages.sort((left, right) => left - right);
+  }
+
+  function shouldUseZoomOutReversePolish(movement: number): boolean {
+    if (movement >= 0 || Math.abs(movement) > 2) {
+      return false;
+    }
+
+    if (zoomOutReversePolishTriggersRemaining < 1) {
+      return false;
+    }
+
+    const elapsedMs = Date.now() - lastZoomOutAtMs;
+    return elapsedMs >= 0 && elapsedMs <= ZOOM_OUT_REVERSE_POLISH_WINDOW_MS;
   }
 
   async function renderPageList(
@@ -544,7 +646,7 @@
     }
   }
 
-  async function maybeRefreshDeferredPagesNearActive(activePage: number): Promise<void> {
+  async function maybeRefreshDeferredPagesNearActive(activePage: number, movement: number): Promise<void> {
     if (!currentPdfPath || isRendering || isDeferredZoomRefreshRunning) {
       return;
     }
@@ -554,7 +656,9 @@
       return;
     }
 
-    const pagesInWindow = deferredPagesInActiveWindow(activePage);
+    const useReversePolish = shouldUseZoomOutReversePolish(movement);
+    const reverseRadius = useReversePolish ? ZOOM_OUT_REVERSE_POLISH_RADIUS : 0;
+    const pagesInWindow = deferredPagesInActiveWindow(activePage, reverseRadius);
     const hasDeferredInWindow = pagesInWindow.length > 0;
     const newlyEnteredWindow = !hadDeferredInActiveWindow && hasDeferredInWindow;
     hadDeferredInActiveWindow = hasDeferredInWindow;
@@ -584,9 +688,13 @@
     }
 
     const generation = renderRequestGeneration;
+    const nonEssentialEpochAtStart = nonEssentialWorkEpoch;
     isDeferredZoomRefreshRunning = true;
     lastDeferredTriggerAtMs = now;
     lastDeferredTriggerPage = activePage;
+    if (useReversePolish) {
+      zoomOutReversePolishTriggersRemaining -= 1;
+    }
 
     try {
       const response = await renderPageList(
@@ -597,7 +705,7 @@
         "Refreshing deferred pages:"
       );
 
-      if (generation !== renderRequestGeneration) {
+      if (generation !== renderRequestGeneration || nonEssentialEpochAtStart !== nonEssentialWorkEpoch) {
         return;
       }
 
@@ -613,7 +721,7 @@
       }
 
       deferredZoomRefreshPages = nextDeferred;
-      hadDeferredInActiveWindow = deferredPagesInActiveWindow(activePage).length > 0;
+      hadDeferredInActiveWindow = deferredPagesInActiveWindow(activePage, reverseRadius).length > 0;
     } catch (error) {
       const message = `PDF render error: ${formatError(error)}`;
       renderError = message;
@@ -678,7 +786,11 @@
     }
   }
 
-  async function loadNextPageWindow(): Promise<void> {
+  async function loadNextPageWindow(
+    requestedWindowSize: number = LOAD_MORE_WINDOW_SIZE,
+    source: "prefetch" | "demand" = "demand",
+    nonEssentialEpochAtStart: number | null = null
+  ): Promise<void> {
     if (!currentPdfPath || isRendering || loadedThroughPage >= pageCount) {
       return;
     }
@@ -687,8 +799,9 @@
     renderError = null;
 
     try {
+      const normalizedWindowSize = Math.max(1, Math.min(LOAD_MORE_WINDOW_SIZE, Math.floor(requestedWindowSize)));
       const startPage = loadedThroughPage + 1;
-      const endPage = Math.min(pageCount, loadedThroughPage + LOAD_MORE_WINDOW_SIZE);
+      const endPage = Math.min(pageCount, loadedThroughPage + normalizedWindowSize);
       const rangeResponse = await renderPageRange(
         currentPdfPath,
         startPage,
@@ -697,11 +810,22 @@
         renderDevicePixelRatio
       );
 
+      if (
+        source === "prefetch" &&
+        nonEssentialEpochAtStart !== null &&
+        nonEssentialEpochAtStart !== nonEssentialWorkEpoch
+      ) {
+        return;
+      }
+
       renderedPages = mergeRenderedPages(renderedPages, rangeResponse.pages);
       loadedThroughPage = endPage;
       pageCount = rangeResponse.totalPages;
       zoom = rangeResponse.resolvedZoom;
-      statusText = `Loaded pages ${startPage}-${endPage} of ${pageCount}.`;
+      statusText =
+        source === "prefetch"
+          ? `Prefetched pages ${startPage}-${endPage} of ${pageCount}.`
+          : `Loaded pages ${startPage}-${endPage} of ${pageCount}.`;
     } catch (error) {
       const message = `PDF render error: ${formatError(error)}`;
       renderError = message;
@@ -799,6 +923,7 @@
       return;
     }
 
+    zoomOutReversePolishTriggersRemaining = 0;
     await rerenderLoadedPagesForZoom(currentPdfPath, nextZoom, loadedThroughPage, focusPage);
   }
 
@@ -814,6 +939,8 @@
       return;
     }
 
+    lastZoomOutAtMs = Date.now();
+    zoomOutReversePolishTriggersRemaining = ZOOM_OUT_REVERSE_POLISH_MAX_TRIGGERS;
     await rerenderLoadedPagesForZoom(currentPdfPath, nextZoom, loadedThroughPage, focusPage);
   }
 

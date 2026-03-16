@@ -1,83 +1,132 @@
 # AGENTS.md
 
-This file defines the rules for AI coding agents working on this repository.
+Operational rules for coding agents in this repository.
 
-Project: Cross-platform PDF Reader + Editor + Converter  
-Stack: Tauri + Rust + Svelte
+Project:
+Offline cross-platform PDF Reader + Editor + Converter
+
+Stack:
+- Tauri
+- Rust
+- Svelte
 
 Target platforms:
 - macOS
 - Windows
 - Linux
 
-The application must run fully offline.
+## 1) Mandatory Pre-Read (No Exceptions)
+Before writing or editing code, read these files in order:
+1. `agentpriorities/AGENTS.md`
+2. `agentpriorities/ROADMAP.md`
+3. `agentpriorities/ARCHITECTURE.md`
 
----
+If they conflict, resolve by priority:
+1. `AGENTS.md`
+2. `ROADMAP.md`
+3. `ARCHITECTURE.md`
 
-# Development Philosophy
+## 2) Current Active Scope
+Current active focus:
+- Phase 1, Step 7 (Reader Performance Hardening)
 
-1. Rust performs all heavy operations.
-2. Svelte handles UI only.
-3. Communication between UI and backend must use Tauri commands.
-4. The system must be modular.
-5. Every feature must be implemented incrementally.
-6. The roadmap must be followed strictly in order.
-7. Completed steps must not be broken by later work.
+Step 8 and beyond:
+- NOT started
+- NOT allowed to be started
 
----
+Editor and converter work:
+- Out of scope until roadmap says otherwise
 
-# High Level Goal
+## 3) Scope Discipline
+Allowed work now:
+- Reader behavior that improves Step 7 goals
+- Tight bug fixes that preserve earlier completed reader steps
+- Policy/document updates that reduce future implementation risk
 
-Build a professional desktop application capable of:
+Not allowed now:
+- Step 8+ features (text layer, search, editor, converter)
+- Refactors that change roadmap phase boundaries
+- Repository-wide restructuring unrelated to Step 7
 
-- Viewing PDFs
-- Editing PDFs
-- Converting multiple formats to PDF
-- Exporting PDFs to other formats
+## 4) Ownership Boundaries (Must Preserve)
+Rust (reader engine) owns:
+- PDF rendering
+- render/cache primitives
+- rendering-related backend commands
 
-Supported formats:
+Svelte (UI) owns:
+- layout and presentation
+- viewport/visible-band tracking
+- mounted page-window decisions
+- interaction and gesture state
 
-Import → PDF
-- TXT
-- MD
-- EPUB
-- DOCX
-- PPTX
+Boundary:
+- Svelte <-> Rust communication only through Tauri commands
+- Do not move rendering ownership from Rust into Svelte
 
-Export from PDF
-- TXT
-- DOCX
-- PPTX
-- MD
-- EPUB
+## 5) Step 7 Reader Rules (Authoritative)
+Treat these as implementation constraints, not suggestions.
 
----
+### 5.1 Visible-Region-First
+- Prioritize responsiveness in/near the viewport over global freshness.
+- Prefer bounded local correctness in the visible band over eager whole-document catch-up.
 
-# Project Structure
+### 5.2 Virtualization Is Required
+- Keep a small mounted page-image window around the viewport.
+- Do not mount full loaded ranges as active page images.
+- Use spacers/placeholders/shells to preserve scroll continuity.
+- Temporarily stale far pages are acceptable.
 
-Frontend:
-- `src/`
-- `src/components/`
-- `Toolbar.svelte`
-- `Sidebar.svelte`
-- `PdfViewer.svelte`
+### 5.3 Stale-Work Suppression
+- Drop/supersede obsolete work when newer state makes it irrelevant.
+- Avoid draining stale queues if it hurts interaction latency.
+- Dedup render requests by page + zoom-state semantics.
 
-Backend:
-- `src-tauri/`
-- `src-tauri/src/`
-- `src-tauri/src/main.rs`
-- `src-tauri/src/commands/`
-- `src-tauri/src/pdf/`
-- `src-tauri/src/converters/`
+### 5.4 Zoom Policy (Pinch-First Direction)
+Target zoom behavior:
+- Immediate visual zoom feedback during pinch/gesture
+- Deferred, bounded real rerender after gesture settles
+- Visible-band rerender priority over distant pages
 
-This structure may grow, but agents must keep it modular and avoid unnecessary restructuring.
+Unacceptable steady state:
+- Mixed zoom-state pages inside the active visible band
 
----
+Do not use:
+- Broad full-range rerenders as the primary zoom consistency strategy
 
-# Communication Model
+### 5.5 Navigation Stability
+- Programmatic next/previous navigation must keep active-target behavior stable.
+- Avoid indicator flicker and stale transition overrides during navigation settle periods.
 
-Frontend must communicate with Rust using Tauri commands via `invoke()`.
+## 6) Forbidden Directions
+Do NOT introduce:
+- Heavy global render queues
+- Broad orchestration subsystems
+- Large task state machines
+- Full-range eager rerender frameworks
+- Strategies that revert virtualization
+- Work that starts Step 8+
 
-Example:
-```ts
-invoke("render_pdf_page")
+## 7) Change Process Rules
+For every change:
+1. Confirm it is within current roadmap scope.
+2. Verify it preserves Rust/Svelte ownership boundaries.
+3. Prefer the smallest change that improves visible-band responsiveness/stability.
+4. Avoid speculative architecture expansion.
+5. Keep behavior modular and incremental.
+
+## 8) Documentation Update Rule
+If behavior/policy for reader Step 7 changes materially, update all relevant source-of-truth docs in the same change:
+- `agentpriorities/AGENTS.md`
+- `agentpriorities/ROADMAP.md`
+- `agentpriorities/ARCHITECTURE.md`
+
+Do not leave policy drift for later.
+
+## 9) Quality Gate Before Closing Work
+Before marking Step 7 work done, verify:
+- No Step 8+ scope leakage
+- Virtualization still active
+- Visible-band responsiveness preserved
+- No unacceptable mixed zoom-state steady state in visible band
+- No regressions to earlier completed reader steps
