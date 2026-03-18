@@ -86,8 +86,10 @@ Scope: viewport-first responsiveness, safer zoom, render work hardening, and vir
 - pinch-first zoom direction
 - immediate visual zoom during gesture
 - deferred bounded real rerender after gesture settle
-- preserve virtualization while converging visible band to consistent zoom state
-- unacceptable steady state: mixed zoom-state pages inside active visible band
+- zoom rerender scoped to visible band + margin only (not all loaded pages)
+- stale-zoom pages show dimmed old content, not blank placeholders
+- pages refresh at new zoom when scrolled into visible band
+- unacceptable steady state: mixed zoom-state pages inside active visible band with no automatic recovery
 
 #### 7.8 Step 7 Completion Sweep (Pending)
 - finalize tuning across fast scroll, pinch zoom, and programmatic navigation

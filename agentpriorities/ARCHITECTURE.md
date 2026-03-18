@@ -103,6 +103,11 @@ Steady-state requirement:
 Non-goal:
 - broad full-range rerender as the default zoom consistency mechanism
 
+Stale-zoom page behavior:
+- stale-zoom pages in the visible band show dimmed old content, not blank placeholders
+- zoom rerender is scoped to visible band + margin, not all loaded pages
+- pages refresh at the new zoom level when scrolled into the visible band
+
 ---
 
 ## 4. Discouraged Architectural Patterns

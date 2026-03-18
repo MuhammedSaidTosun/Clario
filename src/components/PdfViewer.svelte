@@ -6,6 +6,7 @@
   type RenderedPdfPage = {
     page: number;
     imagePath: string;
+    renderedZoom: number;
   };
   type ScrollTarget = {
     page: number;
@@ -34,6 +35,7 @@
     onZoomOut: () => void;
     onLazyLoadNext: () => void;
     onActivePageChange: (page: number) => void;
+    onVisibleBandChange: (startPage: number, endPage: number) => void;
   };
 
   let {
@@ -53,7 +55,8 @@
     onZoomIn,
     onZoomOut,
     onLazyLoadNext,
-    onActivePageChange
+    onActivePageChange,
+    onVisibleBandChange
   }: Props = $props();
 
   const VIEWPORT_PADDING = 24;
@@ -85,6 +88,8 @@
   let virtualTopSpacerPx = $state(0);
   let virtualBottomSpacerPx = $state(0);
   let virtualMountedPages = $state<number[]>([]);
+  let visibleBandStart = $state(1);
+  let visibleBandEnd = $state(0);
   let estimatedPageTopByNumber = $state<Record<number, number>>({});
   let estimatedDisplayHeightByNumber = $state<Record<number, number>>({});
   let pinchDeltaAccumulator = 0;
@@ -222,6 +227,8 @@
       virtualTopSpacerPx = 0;
       virtualBottomSpacerPx = 0;
       virtualMountedPages = [];
+      visibleBandStart = 1;
+      visibleBandEnd = 0;
       estimatedPageTopByNumber = {};
       estimatedDisplayHeightByNumber = {};
       return;
@@ -283,6 +290,14 @@
 
     if (visibleEnd < visibleStart) {
       visibleEnd = visibleStart;
+    }
+
+    const didVisibleBandChange = visibleStart !== visibleBandStart || visibleEnd !== visibleBandEnd;
+    visibleBandStart = visibleStart;
+    visibleBandEnd = visibleEnd;
+
+    if (didVisibleBandChange) {
+      onVisibleBandChange(visibleStart, visibleEnd);
     }
 
     const visibleCount = visibleEnd - visibleStart + 1;
@@ -349,6 +364,22 @@
     }
 
     return null;
+  }
+
+  function normalizeZoomForFreshness(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 1;
+    }
+
+    return Math.round(value * 100) / 100;
+  }
+
+  function renderedPageMatchesTargetZoom(renderedPage: RenderedPdfPage): boolean {
+    return normalizeZoomForFreshness(renderedPage.renderedZoom) === normalizeZoomForFreshness(zoom);
+  }
+
+  function isPageInActiveVisibleBand(pageNumber: number): boolean {
+    return pageNumber >= visibleBandStart && pageNumber <= visibleBandEnd;
   }
 
   function determineVisiblePage(): number | null {
@@ -848,15 +879,19 @@
 
         {#each virtualMountedPages as pageNumber (pageNumber)}
           {@const renderedPage = renderedPageByNumber(pageNumber)}
+          {@const pageIsInVisibleBand = isPageInActiveVisibleBand(pageNumber)}
+          {@const renderedPageIsFresh = renderedPage ? renderedPageMatchesTargetZoom(renderedPage) : false}
           <div class="page-stage" data-page={pageNumber}>
             <div class="page-surface">
               {#if renderedPage}
-                <img
-                  src={convertFileSrc(renderedPage.imagePath)}
-                  alt={"Rendered PDF page " + pageNumber}
-                  onload={(event) => handleImageLoad(pageNumber, event)}
-                  style={imageStyleForPage(pageNumber)}
-                />
+                <div class="page-image-wrapper" class:stale-zoom={pageIsInVisibleBand && !renderedPageIsFresh}>
+                  <img
+                    src={convertFileSrc(renderedPage.imagePath)}
+                    alt={"Rendered PDF page " + pageNumber}
+                    onload={(event) => handleImageLoad(pageNumber, event)}
+                    style={imageStyleForPage(pageNumber)}
+                  />
+                </div>
               {:else}
                 <div
                   class="page-placeholder"
@@ -947,6 +982,18 @@
     background: #fff;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
     border: 1px solid #dadde3;
+  }
+
+  .page-image-wrapper {
+    position: relative;
+  }
+
+  .page-image-wrapper.stale-zoom::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(233, 237, 243, 0.35);
+    pointer-events: none;
   }
 
   .page-surface img {
