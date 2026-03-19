@@ -71,6 +71,7 @@
   const PINCH_WHEEL_DELTA_STEP = 90;
   const PINCH_FLUSH_DELAY_MS = 70;
   const PINCH_APPLY_COOLDOWN_MS = 140;
+  const SCROLL_IDLE_DELAY_MS = 250;
 
   let fitMode = $state<FitMode>("manual");
   let logicalPageSizeByNumber = $state<Record<number, { width: number; height: number }>>({});
@@ -96,6 +97,9 @@
   let pendingPinchZoomDirection: "in" | "out" | null = null;
   let pinchFlushTimeoutId: number | null = null;
   let lastPinchZoomAppliedAtMs = 0;
+  let scrollIdleTimeoutId: number | null = null;
+
+  let renderedPageMap = $derived(new Map(renderedPages.map((rp) => [rp.page, rp])));
 
   $effect(() => {
     const firstPath = renderedPages[0]?.imagePath ?? null;
@@ -357,13 +361,7 @@
   }
 
   function renderedPageByNumber(pageNumber: number): RenderedPdfPage | null {
-    for (const renderedPage of renderedPages) {
-      if (renderedPage.page === pageNumber) {
-        return renderedPage;
-      }
-    }
-
-    return null;
+    return renderedPageMap.get(pageNumber) ?? null;
   }
 
   function normalizeZoomForFreshness(value: number): number {
@@ -455,12 +453,20 @@
 
   function handleViewportScroll(): void {
     scheduleVirtualWindowUpdate();
-    const visiblePage = determineVisiblePage();
-    if (visiblePage !== null) {
-      reportActivePage(visiblePage);
-    }
     scheduleVisiblePageScan();
-    maybeRequestLazyLoad();
+    resetScrollIdleTimer();
+  }
+
+  function resetScrollIdleTimer(): void {
+    if (scrollIdleTimeoutId !== null) {
+      clearTimeout(scrollIdleTimeoutId);
+    }
+
+    scrollIdleTimeoutId = window.setTimeout(() => {
+      scrollIdleTimeoutId = null;
+      recomputeVirtualWindow();
+      maybeRequestLazyLoad();
+    }, SCROLL_IDLE_DELAY_MS);
   }
 
   function schedulePinchFlush(delayMs: number): void {
@@ -826,6 +832,10 @@
   onDestroy(() => {
     if (pinchFlushTimeoutId !== null) {
       clearTimeout(pinchFlushTimeoutId);
+    }
+
+    if (scrollIdleTimeoutId !== null) {
+      clearTimeout(scrollIdleTimeoutId);
     }
   });
 </script>

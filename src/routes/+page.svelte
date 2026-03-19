@@ -539,6 +539,7 @@
       statusText = message;
     } finally {
       isRendering = false;
+      checkAndRefreshStaleBand();
     }
   }
 
@@ -616,6 +617,16 @@
     }
   }
 
+  function checkAndRefreshStaleBand(): void {
+    const band = currentVisibleBand;
+
+    if (band === null) {
+      return;
+    }
+
+    void maybeRefreshStalePagesInBand(band.startPage, band.endPage);
+  }
+
   async function renderPdfDocument(
     filePath: string,
     zoomToRender: number,
@@ -669,6 +680,7 @@
       statusText = message;
     } finally {
       isRendering = false;
+      checkAndRefreshStaleBand();
     }
   }
 
@@ -718,6 +730,7 @@
       statusText = message;
     } finally {
       isRendering = false;
+      checkAndRefreshStaleBand();
     }
   }
 
