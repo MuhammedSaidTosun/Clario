@@ -28,9 +28,9 @@ If they conflict, resolve by priority:
 
 ## 2) Current Active Scope
 Current active focus:
-- Phase 1, Step 7 (Reader Performance Hardening)
+- Phase 1, Step 8 (Text Layer Extraction Foundation)
 
-Step 8 and beyond:
+Step 9 and beyond:
 - NOT started
 - NOT allowed to be started
 
@@ -39,14 +39,14 @@ Editor and converter work:
 
 ## 3) Scope Discipline
 Allowed work now:
-- Reader behavior that improves Step 7 goals
-- Tight bug fixes that preserve earlier completed reader steps
+- Reader behavior that implements Step 8 goals while preserving Step 7 responsiveness
+- Tight bug fixes/refactors in Steps 1-7 that are directly required for Step 8 safety
 - Policy/document updates that reduce future implementation risk
 
 Not allowed now:
-- Step 8+ features (text layer, search, editor, converter)
-- Refactors that change roadmap phase boundaries
-- Repository-wide restructuring unrelated to Step 7
+- Step 9+ features (search/navigation/highlighting, editor, converter)
+- Refactors that change roadmap phase boundaries without Step 8 need
+- Repository-wide restructuring unrelated to Step 8
 
 ## 4) Ownership Boundaries (Must Preserve)
 Rust (reader engine) owns:
@@ -64,7 +64,7 @@ Boundary:
 - Svelte <-> Rust communication only through Tauri commands
 - Do not move rendering ownership from Rust into Svelte
 
-## 5) Step 7 Reader Rules (Authoritative)
+## 5) Reader Rules During Step 8 (Authoritative)
 Treat these as implementation constraints, not suggestions.
 
 ### 5.1 Visible-Region-First
@@ -98,6 +98,12 @@ Do not use:
 - Programmatic next/previous navigation must keep active-target behavior stable.
 - Avoid indicator flicker and stale transition overrides during navigation settle periods.
 
+### 5.6 Text Layer Safety
+- Selectable text overlay is experimental and must be off by default.
+- When text selection mode is off, extraction scheduling and text-layer mounting should be dormant.
+- When enabled, extraction and mounting must stay bounded to mounted active-local pages only.
+- If text-layer behavior conflicts with reader responsiveness, preserve reader responsiveness.
+
 ## 6) Forbidden Directions
 Do NOT introduce:
 - Heavy global render queues
@@ -105,7 +111,7 @@ Do NOT introduce:
 - Large task state machines
 - Full-range eager rerender frameworks
 - Strategies that revert virtualization
-- Work that starts Step 8+
+- Work that starts Step 9+
 
 ## 7) Change Process Rules
 For every change:
@@ -116,7 +122,7 @@ For every change:
 5. Keep behavior modular and incremental.
 
 ## 8) Documentation Update Rule
-If behavior/policy for reader Step 7 changes materially, update all relevant source-of-truth docs in the same change:
+If behavior/policy for reader Step 8 changes materially, update all relevant source-of-truth docs in the same change:
 - `agentpriorities/AGENTS.md`
 - `agentpriorities/ROADMAP.md`
 - `agentpriorities/ARCHITECTURE.md`
@@ -124,9 +130,11 @@ If behavior/policy for reader Step 7 changes materially, update all relevant sou
 Do not leave policy drift for later.
 
 ## 9) Quality Gate Before Closing Work
-Before marking Step 7 work done, verify:
-- No Step 8+ scope leakage
+Before marking Step 8 work done, verify:
+- No Step 9+ scope leakage
 - Virtualization still active
 - Visible-band responsiveness preserved
 - No unacceptable mixed zoom-state steady state in visible band
+- Text extraction remains dormant by default and bounded when experimental mode is enabled
+- Selectable text layer does not regress reader interaction latency in default mode
 - No regressions to earlier completed reader steps

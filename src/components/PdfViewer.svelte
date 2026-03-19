@@ -8,6 +8,20 @@
     imagePath: string;
     renderedZoom: number;
   };
+  type ExtractedPdfPageTextSegment = {
+    text: string;
+    leftRatio: number;
+    topRatio: number;
+    widthRatio: number;
+    heightRatio: number;
+  };
+  type ExtractedPdfPageText = {
+    page: number;
+    pageWidthPoints: number;
+    pageHeightPoints: number;
+    text: string;
+    segments: ExtractedPdfPageTextSegment[];
+  };
   type ScrollTarget = {
     page: number;
     token: number;
@@ -19,6 +33,8 @@
 
   type Props = {
     renderedPages: RenderedPdfPage[];
+    pageTextByPage: Record<number, ExtractedPdfPageText>;
+    textSelectionEnabled: boolean;
     currentPage: number;
     scrollTarget: ScrollTarget | null;
     pageCount: number;
@@ -36,10 +52,13 @@
     onLazyLoadNext: () => void;
     onActivePageChange: (page: number) => void;
     onVisibleBandChange: (startPage: number, endPage: number) => void;
+    onMountedPagesChange: (startPage: number, endPage: number, mountedPages: number[]) => void;
   };
 
   let {
     renderedPages,
+    pageTextByPage,
+    textSelectionEnabled,
     currentPage,
     scrollTarget,
     pageCount,
@@ -56,7 +75,8 @@
     onZoomOut,
     onLazyLoadNext,
     onActivePageChange,
-    onVisibleBandChange
+    onVisibleBandChange,
+    onMountedPagesChange
   }: Props = $props();
 
   const VIEWPORT_PADDING = 24;
@@ -72,6 +92,7 @@
   const PINCH_FLUSH_DELAY_MS = 70;
   const PINCH_APPLY_COOLDOWN_MS = 140;
   const SCROLL_IDLE_DELAY_MS = 250;
+  const TEXT_LAYER_SEGMENT_CAP = 300;
 
   let fitMode = $state<FitMode>("manual");
   let logicalPageSizeByNumber = $state<Record<number, { width: number; height: number }>>({});
@@ -235,6 +256,7 @@
       visibleBandEnd = 0;
       estimatedPageTopByNumber = {};
       estimatedDisplayHeightByNumber = {};
+      onMountedPagesChange(1, 0, []);
       return;
     }
 
@@ -345,6 +367,7 @@
     virtualMountedPages = nextMountedPages;
 
     if (didWindowChange) {
+      onMountedPagesChange(mountedStart, mountedEnd, nextMountedPages);
       scheduleVisiblePageScan();
     }
   }
@@ -585,6 +608,75 @@
     const displayWidth = computeDisplayWidthForPage(pageNumber, fitMode, viewportWidth, viewportHeight);
     const displayHeight = Math.max(1, estimatedDisplayHeightByNumber[pageNumber] ?? DEFAULT_LOGICAL_PAGE_HEIGHT);
     return `width: ${displayWidth}px; height: ${displayHeight}px;`;
+  }
+
+  function displayHeightForPage(pageNumber: number): number {
+    const existingEstimate = estimatedDisplayHeightByNumber[pageNumber];
+
+    if (Number.isFinite(existingEstimate) && existingEstimate > 0) {
+      return Math.max(1, existingEstimate);
+    }
+
+    return estimateDisplayHeightForPage(
+      pageNumber,
+      fitMode,
+      viewportWidth,
+      viewportHeight,
+      averageLogicalPageSize()
+    );
+  }
+
+  function shouldMountTextLayerForPage(pageNumber: number): boolean {
+    if (!textSelectionEnabled) {
+      return false;
+    }
+
+    const preferredPage = activeVisiblePage ?? currentPage;
+
+    if (!Number.isFinite(preferredPage)) {
+      return false;
+    }
+
+    return pageNumber === preferredPage;
+  }
+
+  function pageTextForNumber(pageNumber: number): ExtractedPdfPageText | null {
+    return pageTextByPage[pageNumber] ?? null;
+  }
+
+  function clampRatio(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+
+    return Math.min(1, Math.max(0, value));
+  }
+
+  function textLayerStyleForPage(pageNumber: number): string {
+    const displayWidth = computeDisplayWidthForPage(pageNumber, fitMode, viewportWidth, viewportHeight);
+    const displayHeight = displayHeightForPage(pageNumber);
+    return `width: ${displayWidth}px; height: ${displayHeight}px;`;
+  }
+
+  function textSegmentStyleForPage(pageNumber: number, segment: ExtractedPdfPageTextSegment): string {
+    const displayWidth = computeDisplayWidthForPage(pageNumber, fitMode, viewportWidth, viewportHeight);
+    const displayHeight = displayHeightForPage(pageNumber);
+    const leftPx = Math.min(
+      Math.max(0, Math.round(clampRatio(segment.leftRatio) * displayWidth)),
+      Math.max(0, displayWidth - 1)
+    );
+    const topPx = Math.min(
+      Math.max(0, Math.round(clampRatio(segment.topRatio) * displayHeight)),
+      Math.max(0, displayHeight - 1)
+    );
+    const rawWidthPx = Math.round(clampRatio(segment.widthRatio) * displayWidth);
+    const rawHeightPx = Math.round(clampRatio(segment.heightRatio) * displayHeight);
+    const availableWidth = Math.max(1, displayWidth - leftPx);
+    const availableHeight = Math.max(1, displayHeight - topPx);
+    const widthPx = Math.max(1, Math.min(availableWidth, rawWidthPx));
+    const heightPx = Math.max(1, Math.min(availableHeight, rawHeightPx));
+    const fontSizePx = Math.max(6, Math.floor(heightPx * 0.78));
+    return `left: ${leftPx}px; top: ${topPx}px; width: ${widthPx}px; height: ${heightPx}px; font-size: ${fontSizePx}px; line-height: ${heightPx}px;`;
   }
 
   function setFitToWidth(): void {
@@ -889,8 +981,15 @@
 
         {#each virtualMountedPages as pageNumber (pageNumber)}
           {@const renderedPage = renderedPageByNumber(pageNumber)}
+          {@const extractedPageText = pageTextForNumber(pageNumber)}
+          {@const textSegments = extractedPageText ? extractedPageText.segments.slice(0, TEXT_LAYER_SEGMENT_CAP) : []}
           {@const pageIsInVisibleBand = isPageInActiveVisibleBand(pageNumber)}
           {@const renderedPageIsFresh = renderedPage ? renderedPageMatchesTargetZoom(renderedPage) : false}
+          {@const mountTextLayer =
+            renderedPage &&
+            extractedPageText &&
+            textSegments.length > 0 &&
+            shouldMountTextLayerForPage(pageNumber)}
           <div class="page-stage" data-page={pageNumber}>
             <div class="page-surface">
               {#if renderedPage}
@@ -901,6 +1000,19 @@
                     onload={(event) => handleImageLoad(pageNumber, event)}
                     style={imageStyleForPage(pageNumber)}
                   />
+                  {#if mountTextLayer && extractedPageText}
+                    <div
+                      class="page-text-layer"
+                      style={textLayerStyleForPage(pageNumber)}
+                      aria-label={"Selectable text layer for PDF page " + pageNumber}
+                    >
+                      {#each textSegments as segment, index (`${pageNumber}-${index}`)}
+                        <span class="text-segment" style={textSegmentStyleForPage(pageNumber, segment)}>
+                          {segment.text}
+                        </span>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
               {:else}
                 <div
@@ -1004,6 +1116,37 @@
     inset: 0;
     background: rgba(233, 237, 243, 0.35);
     pointer-events: none;
+  }
+
+  .page-text-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    user-select: none;
+    z-index: 1;
+  }
+
+  .text-segment {
+    position: absolute;
+    display: block;
+    color: transparent;
+    white-space: pre;
+    overflow: hidden;
+    cursor: text;
+    pointer-events: auto;
+    user-select: text;
+    -webkit-user-select: text;
+    background: transparent;
+  }
+
+  .text-segment::selection {
+    background: rgba(42, 79, 122, 0.35);
+    color: transparent;
+  }
+
+  .text-segment::-moz-selection {
+    background: rgba(42, 79, 122, 0.35);
+    color: transparent;
   }
 
   .page-surface img {

@@ -10,9 +10,9 @@ Core rules:
 
 ## Current Status (Authoritative)
 - Active phase: Phase 1 (Reader Core)
-- Active step: Step 7 (Reader Performance Hardening)
-- Active sub-focus: Step 7.7 (Zoom UX + Visible-Band Consistency)
-- Step 8+: NOT STARTED and blocked until Step 7 exit criteria pass
+- Active step: Step 8 (Text Layer Extraction)
+- Active sub-focus: Step 8.1 (Bounded Page-Level Extraction + Selectable Layer Foundation)
+- Step 9+: NOT STARTED and blocked until Step 8 exit criteria pass
 
 ---
 
@@ -52,7 +52,7 @@ Goal: stable, responsive PDF reader foundation for all later work.
 - render visible/nearby pages first
 - defer far-page work
 
-### 7. Reader Performance Hardening (In Progress)
+### 7. Reader Performance Hardening (Completed)
 Scope: viewport-first responsiveness, safer zoom, render work hardening, and virtualization-safe behavior.
 
 #### 7.1 Light Prefetch (Completed)
@@ -83,7 +83,7 @@ Scope: viewport-first responsiveness, safer zoom, render work hardening, and vir
 - allow temporarily stale far pages when needed
 - do not revert to mounting full loaded spans as active images
 
-#### 7.7 Zoom UX + Visible-Band Consistency (Current Focus)
+#### 7.7 Zoom UX + Visible-Band Consistency (Completed)
 - pinch-first zoom direction
 - immediate visual zoom during gesture
 - deferred bounded real rerender after gesture settle
@@ -92,7 +92,7 @@ Scope: viewport-first responsiveness, safer zoom, render work hardening, and vir
 - pages refresh at new zoom when scrolled into visible band
 - unacceptable steady state: mixed zoom-state pages inside active visible band with no automatic recovery
 
-#### 7.8 Step 7 Completion Sweep (Pending)
+#### 7.8 Step 7 Completion Sweep (Completed)
 - finalize tuning across fast scroll, pinch zoom, and programmatic navigation
 - remove/adjust conflicting zoom controls only if they hurt pinch-first model
 - validate no regressions to Steps 1-6 behavior
@@ -109,9 +109,13 @@ All items must be true before Step 8 starts:
 - no heavy global render queues/orchestration introduced
 - no regressions in completed Steps 1-6
 
-### 8. Text Layer Extraction (Blocked)
-- extract selectable text layer from PDFs
-- prepare copy/search foundations
+### 8. Text Layer Extraction (In Progress)
+- page-level text extraction command boundary (Rust -> Tauri -> Svelte)
+- structured segment-level text geometry for future search/navigation groundwork
+- bounded extraction policy tied to mounted window + active-local visible-near pages
+- virtualization-safe text-layer mounting discipline
+- optional experimental invisible selectable overlay (off by default)
+- explicit non-goal: no Step 9 search/match/highlight behavior in this step
 
 ### 9. Search in PDF (Blocked)
 - search text
@@ -166,7 +170,7 @@ Goal: unified cross-platform offline conversion platform.
 ---
 
 ## Non-Negotiable Guardrails
-- Do not start Step 8+ while Step 7 is active.
+- Do not start Step 9+ while Step 8 is active.
 - Do not shift rendering ownership from Rust to Svelte.
 - Do not replace virtualization with full-range mounted image spans.
 - Do not solve zoom consistency via broad full-range rerenders.

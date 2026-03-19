@@ -15,7 +15,8 @@ pub fn run() {
             commands::app_dirs,
             commands::ensure_app_dirs,
             commands::log_info,
-            commands::pdf_reader::render_pdf_page
+            commands::pdf_reader::render_pdf_page,
+            commands::pdf_reader::extract_pdf_page_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

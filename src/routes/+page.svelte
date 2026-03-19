@@ -16,10 +16,43 @@
     zoom: number;
   };
 
+  type PdfPageTextSegmentResponse = {
+    text: string;
+    left_ratio: number;
+    top_ratio: number;
+    width_ratio: number;
+    height_ratio: number;
+  };
+
+  type PdfPageTextResponse = {
+    page: number;
+    page_count: number;
+    page_width_points: number;
+    page_height_points: number;
+    text: string;
+    segments: PdfPageTextSegmentResponse[];
+  };
+
   type RenderedPdfPage = {
     page: number;
     imagePath: string;
     renderedZoom: number;
+  };
+
+  type ExtractedPdfPageTextSegment = {
+    text: string;
+    leftRatio: number;
+    topRatio: number;
+    widthRatio: number;
+    heightRatio: number;
+  };
+
+  type ExtractedPdfPageText = {
+    page: number;
+    pageWidthPoints: number;
+    pageHeightPoints: number;
+    text: string;
+    segments: ExtractedPdfPageTextSegment[];
   };
 
   type VisibleBand = {
@@ -46,6 +79,18 @@
     generation: number;
   };
 
+  type TextRequestKeyParts = {
+    filePath: string;
+    page: number;
+    generation: number;
+  };
+
+  type MountedPageWindow = {
+    startPage: number;
+    endPage: number;
+    pages: number[];
+  };
+
   const MIN_ZOOM = 0.5;
   const MAX_ZOOM = 3.0;
   const ZOOM_STEP = 0.25;
@@ -60,6 +105,9 @@
   const NAVIGATION_TRANSITION_TIMEOUT_MS = 1500;
   const ZOOM_VISIBLE_BAND_MARGIN = 1;
   const STALE_REFRESH_COOLDOWN_MS = 200;
+  const TEXT_EXTRACTION_BATCH_SIZE = 2;
+  const TEXT_EXTRACTION_ACTIVE_PAGE_MARGIN = 1;
+  const TEXT_CACHE_MOUNT_MARGIN = 2;
 
   let selectedFilePath = $state("No file selected.");
   let debugDirs = $state<AppDirs | null>(null);
@@ -87,6 +135,44 @@
   let isStaleRefreshRunning = false;
   let lastStaleRefreshAtMs = 0;
   let currentVisibleBand = $state<VisibleBand | null>(null);
+  let textSelectionMode = $state<"off" | "experimental">("off");
+  let pageTextByPage = $state<Record<number, ExtractedPdfPageText>>({});
+  let mountedPageWindow = $state<MountedPageWindow | null>(null);
+  let textRequestGeneration = 0;
+  let pendingTextRequests = new Map<string, Promise<PdfPageTextResponse>>();
+  let pendingExtractionPages = new Set<number>();
+  let isTextExtractionRunning = false;
+  let needsExtractionRetry = false;
+
+  function isTextSelectionExperimentalEnabled(): boolean {
+    return textSelectionMode === "experimental";
+  }
+
+  function clearTextExtractionState(clearCache: boolean): void {
+    textRequestGeneration += 1;
+    pendingTextRequests.clear();
+    pendingExtractionPages.clear();
+    needsExtractionRetry = false;
+
+    if (clearCache && Object.keys(pageTextByPage).length > 0) {
+      pageTextByPage = {};
+    }
+  }
+
+  function handleTextSelectionToggle(): void {
+    const nextMode = textSelectionMode === "experimental" ? "off" : "experimental";
+    textSelectionMode = nextMode;
+
+    if (nextMode === "off") {
+      clearTextExtractionState(true);
+      statusText = "Text selection overlay disabled.";
+      return;
+    }
+
+    pruneTextCacheToMountedWindow();
+    scheduleTextExtractionPass();
+    statusText = "Text selection overlay enabled (experimental).";
+  }
 
   function formatError(error: unknown): string {
     if (error instanceof Error) {
@@ -140,6 +226,8 @@
     completedRenderRequests.clear();
     isStaleRefreshRunning = false;
     lastStaleRefreshAtMs = 0;
+    mountedPageWindow = null;
+    clearTextExtractionState(true);
   }
 
   function normalizeForKey(value: number): number {
@@ -158,6 +246,50 @@
       normalizeForKey(parts.zoom),
       normalizeForKey(parts.devicePixelRatio)
     ].join("|");
+  }
+
+  function textRequestKey(parts: TextRequestKeyParts): string {
+    return [parts.generation, parts.filePath, parts.page].join("|");
+  }
+
+  function normalizeRatio(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+
+    return Math.min(1, Math.max(0, value));
+  }
+
+  function normalizeTextValue(value: string): string {
+    return value.replace(/\u0000/g, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  }
+
+  function uniqueSortedPages(pages: number[]): number[] {
+    const unique = new Set<number>();
+
+    for (const page of pages) {
+      if (!Number.isFinite(page)) {
+        continue;
+      }
+
+      unique.add(Math.max(1, Math.floor(page)));
+    }
+
+    return Array.from(unique.values()).sort((left, right) => left - right);
+  }
+
+  function areSamePageLists(left: number[], right: number[]): boolean {
+    if (left.length !== right.length) {
+      return false;
+    }
+
+    for (let index = 0; index < left.length; index += 1) {
+      if (left[index] !== right[index]) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   function clampPageWithinLoaded(page: number, loadedThrough: number): number {
@@ -233,6 +365,342 @@
     };
 
     void maybeRefreshStalePagesInBand(normalizedStart, normalizedEnd);
+
+    if (isTextSelectionExperimentalEnabled()) {
+      scheduleTextExtractionPass();
+    }
+  }
+
+  function handleMountedPagesChange(startPage: number, endPage: number, mountedPages: number[]): void {
+    const normalizedPages = uniqueSortedPages(
+      mountedPages.filter((page) => page >= 1 && page <= loadedThroughPage)
+    );
+    const normalizedStart = normalizedPages[0] ?? Math.max(1, Math.floor(startPage));
+    const normalizedEnd =
+      normalizedPages[normalizedPages.length - 1] ?? Math.max(normalizedStart, Math.floor(endPage));
+    const existingWindow = mountedPageWindow;
+
+    if (
+      existingWindow !== null &&
+      existingWindow.startPage === normalizedStart &&
+      existingWindow.endPage === normalizedEnd &&
+      areSamePageLists(existingWindow.pages, normalizedPages)
+    ) {
+      return;
+    }
+
+    mountedPageWindow = {
+      startPage: normalizedStart,
+      endPage: normalizedEnd,
+      pages: normalizedPages
+    };
+
+    if (isTextSelectionExperimentalEnabled()) {
+      pruneTextCacheToMountedWindow();
+      scheduleTextExtractionPass();
+    }
+  }
+
+  function mountedPagesWithinLoadedWindow(): number[] {
+    const window = mountedPageWindow;
+
+    if (window === null || loadedThroughPage < 1) {
+      return [];
+    }
+
+    return uniqueSortedPages(window.pages.filter((page) => page >= 1 && page <= loadedThroughPage));
+  }
+
+  function textExtractionFocusPage(): number | null {
+    if (loadedThroughPage < 1) {
+      return null;
+    }
+
+    if (currentVisibleBand !== null) {
+      const bandStart = clampPageWithinLoaded(
+        Math.min(currentVisibleBand.startPage, currentVisibleBand.endPage),
+        loadedThroughPage
+      );
+      const bandEnd = clampPageWithinLoaded(
+        Math.max(currentVisibleBand.startPage, currentVisibleBand.endPage),
+        loadedThroughPage
+      );
+
+      return clampPageWithinLoaded(Math.floor((bandStart + bandEnd) / 2), loadedThroughPage);
+    }
+
+    return clampPageWithinLoaded(currentPage, loadedThroughPage);
+  }
+
+  function candidateMountedPagesForTextExtraction(mountedPages: number[]): number[] {
+    const focusPage = textExtractionFocusPage();
+
+    if (focusPage === null) {
+      return [];
+    }
+
+    const extractionStart = Math.max(1, focusPage - TEXT_EXTRACTION_ACTIVE_PAGE_MARGIN);
+    const extractionEnd = Math.min(loadedThroughPage, focusPage + TEXT_EXTRACTION_ACTIVE_PAGE_MARGIN);
+
+    return uniqueSortedPages(
+      mountedPages.filter((page) => page >= extractionStart && page <= extractionEnd)
+    );
+  }
+
+  function prioritizePagesForTextExtraction(pages: number[]): number[] {
+    const normalized = uniqueSortedPages(pages);
+    const focusPage = textExtractionFocusPage();
+
+    if (focusPage === null) {
+      return normalized;
+    }
+
+    return normalized
+      .slice()
+      .sort(
+        (left, right) => Math.abs(left - focusPage) - Math.abs(right - focusPage) || left - right
+      );
+  }
+
+  function orderedPendingExtractionPages(): number[] {
+    return prioritizePagesForTextExtraction(Array.from(pendingExtractionPages.values()));
+  }
+
+  function nextTextExtractionBatch(batchSize: number): number[] {
+    const nextPages = orderedPendingExtractionPages().slice(0, Math.max(1, Math.floor(batchSize)));
+
+    for (const page of nextPages) {
+      pendingExtractionPages.delete(page);
+    }
+
+    return nextPages;
+  }
+
+  function mapExtractedPdfPageText(response: PdfPageTextResponse): ExtractedPdfPageText {
+    return {
+      page: response.page,
+      pageWidthPoints: Math.max(1, Number(response.page_width_points) || 1),
+      pageHeightPoints: Math.max(1, Number(response.page_height_points) || 1),
+      text: normalizeTextValue(response.text ?? ""),
+      segments: (response.segments ?? [])
+        .map((segment) => ({
+          text: normalizeTextValue(segment.text ?? ""),
+          leftRatio: normalizeRatio(segment.left_ratio),
+          topRatio: normalizeRatio(segment.top_ratio),
+          widthRatio: normalizeRatio(segment.width_ratio),
+          heightRatio: normalizeRatio(segment.height_ratio)
+        }))
+        .filter((segment) => segment.text.length > 0 && segment.widthRatio > 0 && segment.heightRatio > 0)
+    };
+  }
+
+  async function extractSinglePdfPageText(filePath: string, page: number): Promise<PdfPageTextResponse> {
+    const generation = textRequestGeneration;
+    const key = textRequestKey({
+      filePath,
+      page,
+      generation
+    });
+
+    const pending = pendingTextRequests.get(key);
+
+    if (pending) {
+      return pending;
+    }
+
+    const request = invoke<PdfPageTextResponse>("extract_pdf_page_text", {
+      filePath,
+      page
+    }).finally(() => {
+      pendingTextRequests.delete(key);
+    });
+
+    pendingTextRequests.set(key, request);
+    return request;
+  }
+
+  function pruneTextCacheToMountedWindow(): void {
+    const mountedPages = mountedPagesWithinLoadedWindow();
+
+    if (mountedPages.length < 1) {
+      if (Object.keys(pageTextByPage).length > 0) {
+        pageTextByPage = {};
+      }
+
+      pendingExtractionPages.clear();
+      return;
+    }
+
+    const minMountedPage = mountedPages[0];
+    const maxMountedPage = mountedPages[mountedPages.length - 1];
+    const keepStart = Math.max(1, minMountedPage - TEXT_CACHE_MOUNT_MARGIN);
+    const keepEnd = maxMountedPage + TEXT_CACHE_MOUNT_MARGIN;
+    const currentEntries = Object.entries(pageTextByPage);
+    const nextCache: Record<number, ExtractedPdfPageText> = {};
+    let changed = false;
+
+    for (const [pageKey, pageText] of currentEntries) {
+      const pageNumber = Number(pageKey);
+
+      if (!Number.isFinite(pageNumber)) {
+        changed = true;
+        continue;
+      }
+
+      if (pageNumber < keepStart || pageNumber > keepEnd) {
+        changed = true;
+        continue;
+      }
+
+      nextCache[pageNumber] = pageText;
+    }
+
+    if (changed) {
+      pageTextByPage = nextCache;
+    }
+
+    for (const pendingPage of Array.from(pendingExtractionPages.values())) {
+      if (pendingPage < keepStart || pendingPage > keepEnd) {
+        pendingExtractionPages.delete(pendingPage);
+      }
+    }
+  }
+
+  function scheduleTextExtractionPass(): void {
+    if (!isTextSelectionExperimentalEnabled()) {
+      return;
+    }
+
+    if (!currentPdfPath || loadedThroughPage < 1) {
+      return;
+    }
+
+    const mountedPages = mountedPagesWithinLoadedWindow();
+
+    if (mountedPages.length < 1) {
+      return;
+    }
+
+    const prioritizedPages = prioritizePagesForTextExtraction(
+      candidateMountedPagesForTextExtraction(mountedPages)
+    );
+
+    for (const page of prioritizedPages) {
+      if (pageTextByPage[page]) {
+        continue;
+      }
+
+      pendingExtractionPages.add(page);
+    }
+
+    if (pendingExtractionPages.size < 1) {
+      return;
+    }
+
+    if (isRendering || isStaleRefreshRunning) {
+      needsExtractionRetry = true;
+      return;
+    }
+
+    void runPendingTextExtractionQueue();
+  }
+
+  async function runPendingTextExtractionQueue(): Promise<void> {
+    if (!isTextSelectionExperimentalEnabled()) {
+      return;
+    }
+
+    if (isTextExtractionRunning) {
+      return;
+    }
+
+    if (!currentPdfPath) {
+      return;
+    }
+
+    if (isRendering || isStaleRefreshRunning) {
+      needsExtractionRetry = true;
+      return;
+    }
+
+    isTextExtractionRunning = true;
+
+    try {
+      while (pendingExtractionPages.size > 0) {
+        if (!isTextSelectionExperimentalEnabled()) {
+          break;
+        }
+
+        if (!currentPdfPath) {
+          break;
+        }
+
+        if (isRendering || isStaleRefreshRunning) {
+          needsExtractionRetry = true;
+          break;
+        }
+
+        const batchPages = nextTextExtractionBatch(TEXT_EXTRACTION_BATCH_SIZE);
+
+        if (batchPages.length < 1) {
+          break;
+        }
+
+        const generationAtStart = textRequestGeneration;
+        const filePathAtStartValue = currentPdfPath;
+
+        if (!filePathAtStartValue) {
+          break;
+        }
+
+        const filePathAtStart: string = filePathAtStartValue;
+        const responses = await Promise.all(
+          batchPages.map((page) => extractSinglePdfPageText(filePathAtStart, page))
+        );
+
+        if (generationAtStart !== textRequestGeneration || currentPdfPath !== filePathAtStart) {
+          return;
+        }
+
+        if (!isTextSelectionExperimentalEnabled()) {
+          return;
+        }
+
+        const nextPageTextByPage = { ...pageTextByPage };
+
+        for (const response of responses) {
+          nextPageTextByPage[response.page] = mapExtractedPdfPageText(response);
+        }
+
+        pageTextByPage = nextPageTextByPage;
+        pruneTextCacheToMountedWindow();
+      }
+    } catch (error) {
+      const message = `PDF text extraction error: ${formatError(error)}`;
+      renderError = message;
+      statusText = message;
+    } finally {
+      isTextExtractionRunning = false;
+
+      if (!isTextSelectionExperimentalEnabled()) {
+        return;
+      }
+
+      if (pendingExtractionPages.size > 0) {
+        if (isRendering || isStaleRefreshRunning) {
+          needsExtractionRetry = true;
+          return;
+        }
+
+        void runPendingTextExtractionQueue();
+        return;
+      }
+
+      if (needsExtractionRetry && !isRendering && !isStaleRefreshRunning) {
+        needsExtractionRetry = false;
+        scheduleTextExtractionPass();
+      }
+    }
   }
 
   function requestViewerScrollToPage(page: number): void {
@@ -840,6 +1308,31 @@
     await rerenderLoadedPagesForZoom(currentPdfPath, nextZoom, loadedThroughPage, focusPage);
   }
 
+  $effect(() => {
+    currentPdfPath;
+    loadedThroughPage;
+    currentVisibleBand;
+    mountedPageWindow;
+    textSelectionMode;
+
+    if (!isTextSelectionExperimentalEnabled()) {
+      return;
+    }
+
+    pruneTextCacheToMountedWindow();
+    scheduleTextExtractionPass();
+  });
+
+  $effect(() => {
+    isRendering;
+    isStaleRefreshRunning;
+
+    if (!isRendering && !isStaleRefreshRunning && needsExtractionRetry && isTextSelectionExperimentalEnabled()) {
+      needsExtractionRetry = false;
+      scheduleTextExtractionPass();
+    }
+  });
+
   onMount(async () => {
     try {
       await invoke("ensure_app_dirs");
@@ -887,7 +1380,19 @@
 
 <main class="page">
   <h1>Clario</h1>
-  <button type="button" onclick={openFile}>Open File</button>
+  <div class="top-actions">
+    <button type="button" onclick={openFile}>Open File</button>
+    <button
+      type="button"
+      class="secondary"
+      onclick={handleTextSelectionToggle}
+      disabled={currentPdfPath === null}
+    >
+      {textSelectionMode === "experimental"
+        ? "Disable Text Selection (Experimental)"
+        : "Enable Text Selection (Experimental)"}
+    </button>
+  </div>
 
   <section class="panel">
     <h2>Selected File</h2>
@@ -896,6 +1401,7 @@
 
   <PdfViewer
     renderedPages={renderedPages}
+    pageTextByPage={pageTextByPage}
     currentPage={currentPage}
     scrollTarget={scrollTarget}
     pageCount={pageCount}
@@ -906,6 +1412,7 @@
     hasPdfLoaded={currentPdfPath !== null && pageCount > 0 && renderedPages.length > 0}
     hasMorePages={currentPdfPath !== null && loadedThroughPage < pageCount}
     isBusy={isRendering}
+    textSelectionEnabled={textSelectionMode === "experimental"}
     onPrev={handlePrevPage}
     onNext={handleNextPage}
     onZoomIn={handleZoomIn}
@@ -913,6 +1420,7 @@
     onLazyLoadNext={handleLazyLoadNext}
     onActivePageChange={handleActivePageChange}
     onVisibleBandChange={handleVisibleBandChange}
+    onMountedPagesChange={handleMountedPagesChange}
   />
 
   <section class="panel debug">
@@ -926,6 +1434,7 @@
       <p>Loading paths...</p>
     {/if}
     <p><strong>status:</strong> {statusText}</p>
+    <p><strong>text selection mode:</strong> {textSelectionMode}</p>
   </section>
 </main>
 
@@ -942,6 +1451,12 @@
     margin: 0 0 1rem;
   }
 
+  .top-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
   button {
     border: 1px solid #2a4f7a;
     background: #2a4f7a;
@@ -954,6 +1469,16 @@
 
   button:hover {
     background: #1f3c5f;
+  }
+
+  button.secondary {
+    background: #eef2f7;
+    color: #1f3c5f;
+    border-color: #8aa0b8;
+  }
+
+  button.secondary:hover {
+    background: #dfe7f0;
   }
 
   .panel {

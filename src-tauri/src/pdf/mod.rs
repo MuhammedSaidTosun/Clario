@@ -21,6 +21,25 @@ pub struct PdfPageRenderResponse {
     pub zoom: f32,
 }
 
+#[derive(Debug, Serialize)]
+pub struct PdfPageTextSegmentResponse {
+    pub text: String,
+    pub left_ratio: f32,
+    pub top_ratio: f32,
+    pub width_ratio: f32,
+    pub height_ratio: f32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PdfPageTextResponse {
+    pub page: u16,
+    pub page_count: u16,
+    pub page_width_points: f32,
+    pub page_height_points: f32,
+    pub text: String,
+    pub segments: Vec<PdfPageTextSegmentResponse>,
+}
+
 pub fn render_pdf_page(
     file_path: &str,
     page: u16,
@@ -97,6 +116,90 @@ pub fn render_pdf_page(
         page,
         page_count,
         zoom: normalized_zoom,
+    })
+}
+
+pub fn extract_pdf_page_text(file_path: &str, page: u16) -> Result<PdfPageTextResponse, String> {
+    let input_path = PathBuf::from(file_path);
+
+    if !input_path.exists() {
+        return Err(format!(
+            "PDF file was not found at '{}'.",
+            input_path.display()
+        ));
+    }
+
+    if !is_pdf_path(&input_path) {
+        return Err("Selected file is not a PDF.".to_string());
+    }
+
+    if page == 0 {
+        return Err("Page index is 1-based; page must be >= 1.".to_string());
+    }
+
+    let pdfium = bind_pdfium()?;
+    let document = pdfium
+        .load_pdf_from_file(&input_path, None)
+        .map_err(|error| format!("Failed to load PDF document: {error}"))?;
+
+    let page_count = document.pages().len();
+
+    if page > page_count {
+        return Err(format!(
+            "Page {page} is out of range. This document has {page_count} page(s)."
+        ));
+    }
+
+    // Backend command uses 1-based indexing externally; PDFium page APIs are 0-based.
+    let page_index = page - 1;
+    let pdf_page = document
+        .pages()
+        .get(page_index)
+        .map_err(|error| format!("Failed to read page {page}: {error}"))?;
+
+    let page_width_points = normalize_page_dimension(pdf_page.width().value);
+    let page_height_points = normalize_page_dimension(pdf_page.height().value);
+
+    let text_page = pdf_page
+        .text()
+        .map_err(|error| format!("Failed to extract text from page {page}: {error}"))?;
+    let page_text = normalize_extracted_text(text_page.all());
+    let mut segments: Vec<PdfPageTextSegmentResponse> = Vec::new();
+
+    for segment in text_page.segments().iter() {
+        let segment_text = normalize_extracted_text(segment.text());
+
+        if segment_text.trim().is_empty() {
+            continue;
+        }
+
+        let bounds = segment.bounds();
+        let (left_ratio, top_ratio, width_ratio, height_ratio) = rect_to_normalized_ratios(
+            bounds,
+            page_width_points,
+            page_height_points,
+        );
+
+        if width_ratio <= 0.0 || height_ratio <= 0.0 {
+            continue;
+        }
+
+        segments.push(PdfPageTextSegmentResponse {
+            text: segment_text,
+            left_ratio,
+            top_ratio,
+            width_ratio,
+            height_ratio,
+        });
+    }
+
+    Ok(PdfPageTextResponse {
+        page,
+        page_count,
+        page_width_points,
+        page_height_points,
+        text: page_text,
+        segments,
     })
 }
 
@@ -243,6 +346,53 @@ fn is_pdf_path(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .map(|extension| extension.eq_ignore_ascii_case("pdf"))
         .unwrap_or(false)
+}
+
+fn normalize_extracted_text(raw_text: String) -> String {
+    raw_text
+        .replace('\0', "")
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+}
+
+fn normalize_page_dimension(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        1.0
+    }
+}
+
+fn rect_to_normalized_ratios(
+    bounds: PdfRect,
+    page_width_points: f32,
+    page_height_points: f32,
+) -> (f32, f32, f32, f32) {
+    let safe_width = normalize_page_dimension(page_width_points);
+    let safe_height = normalize_page_dimension(page_height_points);
+
+    let raw_left = bounds.left().value / safe_width;
+    let raw_right = bounds.right().value / safe_width;
+    let left_ratio = clamp_unit(raw_left.min(raw_right));
+    let right_ratio = clamp_unit(raw_left.max(raw_right));
+    let width_ratio = (right_ratio - left_ratio).max(0.0);
+
+    // PDF coordinate system uses bottom-left origin. Convert to top-left ratio space.
+    let raw_top_from_top = 1.0 - (bounds.top().value / safe_height);
+    let raw_bottom_from_top = 1.0 - (bounds.bottom().value / safe_height);
+    let top_ratio = clamp_unit(raw_top_from_top.min(raw_bottom_from_top));
+    let bottom_ratio = clamp_unit(raw_top_from_top.max(raw_bottom_from_top));
+    let height_ratio = (bottom_ratio - top_ratio).max(0.0);
+
+    (left_ratio, top_ratio, width_ratio, height_ratio)
+}
+
+fn clamp_unit(value: f32) -> f32 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+
+    value.clamp(0.0, 1.0)
 }
 
 fn normalize_zoom(zoom: f32) -> f32 {

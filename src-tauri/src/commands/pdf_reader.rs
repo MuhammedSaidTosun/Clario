@@ -1,4 +1,7 @@
-use crate::pdf::{render_pdf_page as render_pdf_page_to_cache, PdfPageRenderResponse};
+use crate::pdf::{
+    extract_pdf_page_text as extract_pdf_page_text_for_page,
+    render_pdf_page as render_pdf_page_to_cache, PdfPageRenderResponse, PdfPageTextResponse,
+};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
@@ -17,6 +20,16 @@ pub fn render_pdf_page(
     let cache_dir = app_data_dir(&app)?.join(CACHE_DIR_NAME);
 
     render_pdf_page_to_cache(&file_path, page, zoom, device_pixel_ratio, &cache_dir)
+}
+
+#[tauri::command]
+pub fn extract_pdf_page_text(
+    app: AppHandle,
+    file_path: String,
+    page: u16,
+) -> Result<PdfPageTextResponse, String> {
+    super::ensure_app_dirs(app)?;
+    extract_pdf_page_text_for_page(&file_path, page)
 }
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {

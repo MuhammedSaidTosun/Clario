@@ -68,7 +68,7 @@ Contract intent:
 
 ## 3. Reader Architecture (Current Direction)
 
-Phase 1 Step 7 is active.
+Phase 1 Step 8 is active.
 Reader architecture must stay aligned to these rules.
 
 ### 3.1 Viewport-First Decision Model
@@ -109,6 +109,15 @@ Stale-zoom page behavior:
 - zoom rerender is scoped to visible band + margin, not all loaded pages
 - pages refresh at the new zoom level when scrolled into the visible band
 
+### 3.6 Text Layer Extraction Policy (Step 8)
+- Reader remains image-render-based at its core.
+- Rust owns page text extraction and normalization.
+- Svelte mounts text presentation only in experimental mode, bounded to mounted active-local pages.
+- Text extraction must remain bounded, deduplicated, and stale-safe.
+- Extraction should defer under heavy active rendering and retry once rendering settles.
+- Selectable text layer is allowed as a foundation for copy/search preparation, but is off by default.
+- Step 8 must not introduce Step 9 search query, match navigation, or match highlighting behavior.
+
 ---
 
 ## 4. Discouraged Architectural Patterns
@@ -143,5 +152,5 @@ Future conversion flow:
 3. Tauri commands are the only app-layer boundary.
 4. Virtualization is part of intended reader architecture and must be preserved.
 5. Viewport-first bounded behavior is preferred over global eager consistency.
-6. Step 7 reader hardening must not be used to start Step 8+ scope.
+6. Step 8 text-layer work must not be used to start Step 9+ scope.
 7. Reader changes must avoid heavy queue/orchestration expansion.
