@@ -75,6 +75,7 @@ Reader architecture must stay aligned to these rules.
 - Prioritize the active visible region and nearby pages.
 - Avoid broad global synchronization when it hurts interaction latency.
 - Local visible correctness has higher priority than far-page freshness.
+- Initial document load should render only viewport-near pages; far pages load via prefetch on demand.
 
 ### 3.2 Virtualized Continuous Scroll Model
 - Keep only a small mounted page-image window around viewport.

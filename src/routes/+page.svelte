@@ -51,7 +51,7 @@
   const ZOOM_STEP = 0.25;
   const MIN_DEVICE_PIXEL_RATIO = 1;
   const MAX_DEVICE_PIXEL_RATIO = 4;
-  const INITIAL_RENDER_WINDOW_SIZE = 24;
+  const INITIAL_RENDER_WINDOW_SIZE = 10;
   const LOAD_MORE_WINDOW_SIZE = 6;
   const PREFETCH_TRIGGER_AHEAD_PAGES = 7;
   const PREFETCH_COOLDOWN_MS = 280;
@@ -685,7 +685,7 @@
     renderError = null;
 
     try {
-      const normalizedWindowSize = Math.max(1, Math.min(LOAD_MORE_WINDOW_SIZE, Math.floor(requestedWindowSize)));
+      const normalizedWindowSize = Math.max(1, Math.floor(requestedWindowSize));
       const startPage = loadedThroughPage + 1;
       const endPage = Math.min(pageCount, loadedThroughPage + normalizedWindowSize);
       const rangeResponse = await renderPageRange(

@@ -37,6 +37,7 @@ Goal: stable, responsive PDF reader foundation for all later work.
 - fit-to-width
 - fit-to-page
 - improved viewer layout
+- bounded initial render window (viewport-near pages only, not full document)
 
 ### 4. Continuous Scroll Viewer (Completed)
 - vertical continuous page flow
